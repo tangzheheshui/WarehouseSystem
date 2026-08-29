@@ -87,6 +87,8 @@ class BasePathTests(unittest.TestCase):
         script = (PROJECT_ROOT / "static" / "app.js").read_text()
         self.assertIn('href="styles.css"', index)
         self.assertIn('src="app.js"', index)
+        self.assertIn('<label>姓名全拼<input name="username"', index)
+        self.assertNotIn('<input name="phone"', index)
         self.assertIn("BASE_PATH", script)
         self.assertIn("wmsToken:${BASE_PATH}", script)
 
