@@ -1,4 +1,6 @@
-const BASE_PATH = location.pathname.replace(/(?:\/index\.html)?$/, "/");
+const BASE_PATH = location.pathname
+  .replace(/\/index\.html$/, "")
+  .replace(/\/?$/, "/");
 const TOKEN_KEY = `wmsToken:${BASE_PATH}`;
 const PROJECT_KEY = `wmsProject:${BASE_PATH}`;
 

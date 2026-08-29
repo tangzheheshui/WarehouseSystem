@@ -81,7 +81,7 @@ fi
 
 if [ -z "${APP_PORT:-}" ]; then
   if [ "$DB_EXISTS" = yes ]; then
-    APP_PORT=$(ssh "$SSH_TARGET" "awk -F= '\$1 == \"WMS_APP_PORT\" {print \$2}' '$ENV_FILE'")
+    APP_PORT=$(ssh "$SSH_TARGET" "sudo awk -F= '\$1 == \"WMS_APP_PORT\" {print \$2}' '$ENV_FILE'")
   fi
 fi
 

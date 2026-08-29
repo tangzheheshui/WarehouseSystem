@@ -6,7 +6,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(PROJECT_ROOT / "server"))
 
 from app import Handler, normalize_base_path
@@ -91,6 +91,8 @@ class BasePathTests(unittest.TestCase):
         self.assertNotIn('<input name="phone"', index)
         self.assertIn("BASE_PATH", script)
         self.assertIn("wmsToken:${BASE_PATH}", script)
+        self.assertIn('.replace(/\\/index\\.html$/, "")', script)
+        self.assertIn('.replace(/\\/?$/, "/")', script)
 
 
 if __name__ == "__main__":

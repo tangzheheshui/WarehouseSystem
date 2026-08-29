@@ -36,10 +36,12 @@ WMS_ADMIN_NAME=张三 WMS_ADMIN_USERNAME=zhangsan WMS_ADMIN_PASSWORD='初始密�
 ## 测试
 
 ```bash
-./test.sh
+./tests/scripts/run.sh
 ```
 
-覆盖 Excel 读写、登录锁定、权限、项目隔离、导入校验、出入库、到期日计算、历史 CSV、V1 迁移和访问前缀。
+覆盖 Excel 读写、登录锁定、权限、项目隔离、导入校验、出入库、到期日计算、历史 CSV、V1 迁移和访问前缀。测试使用临时数据库，自动创建测试账号，不依赖生产环境或 `acme`。
+
+测试说明和详细用例见 [tests/README.md](tests/README.md)、[test-cases.md](tests/cases/test-cases.md)。V3 需求基线见 [requirements-V3.md](docs/requirements-V3.md)。
 
 ## 部署
 
