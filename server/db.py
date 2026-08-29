@@ -1,51 +1,97 @@
 import json
 import os
 import sqlite3
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from security import hash_password
 
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_DB_PATH = PROJECT_ROOT / "data" / "warehouse.db"
-
 
 DEFAULT_TEMPLATES = {
     "inbound": [
-        {"key": "product_id", "name": "商品ID", "required": True, "type": "text"},
-        {"key": "product_name", "name": "商品名称", "required": True, "type": "text"},
+        {"key": "product_code", "name": "货品编号", "required": True, "type": "text"},
+        {"key": "product_name", "name": "货品名称", "required": True, "type": "text"},
         {"key": "spec", "name": "规格", "required": False, "type": "text"},
-        {"key": "batch_no", "name": "批次号", "required": True, "type": "text"},
-        {"key": "production_date", "name": "生产日期", "required": False, "type": "date"},
-        {"key": "shelf_life_days", "name": "保质期（天）", "required": False, "type": "integer"},
-        {"key": "quantity", "name": "数量", "required": True, "type": "integer"},
-        {"key": "location", "name": "库位", "required": True, "type": "text"},
+        {"key": "unit", "name": "标准单位", "required": False, "type": "text"},
+        {"key": "batch_no", "name": "生产批号", "required": True, "type": "text"},
+        {"key": "production_date", "name": "生产日期", "required": True, "type": "date"},
+        {"key": "shelf_life_days", "name": "保质期（天）", "required": True, "type": "integer"},
+        {"key": "inbound_date", "name": "入库日", "required": True, "type": "date"},
+        {"key": "quantity", "name": "标准单位数", "required": True, "type": "integer"},
+        {"key": "warehouse_name", "name": "仓库", "required": True, "type": "text"},
+        {"key": "storage_area", "name": "库区", "required": True, "type": "text"},
+        {"key": "cargo_area", "name": "货区", "required": True, "type": "text"},
+        {"key": "location_name", "name": "货位", "required": True, "type": "text"},
+        {"key": "quality_status", "name": "品质标记", "required": True, "type": "text"},
+        {"key": "purchase_order_no", "name": "采购单号", "required": False, "type": "text"},
         {"key": "note", "name": "备注", "required": False, "type": "text"},
     ],
     "outbound": [
-        {"key": "product_id", "name": "商品ID", "required": True, "type": "text"},
-        {"key": "product_name", "name": "商品名称", "required": True, "type": "text"},
-        {"key": "spec", "name": "规格", "required": False, "type": "text"},
-        {"key": "quantity", "name": "数量", "required": True, "type": "integer"},
+        {"key": "product_code", "name": "货品编号", "required": True, "type": "text"},
+        {"key": "product_name", "name": "货品名称", "required": True, "type": "text"},
+        {"key": "quantity", "name": "标准单位数", "required": True, "type": "integer"},
         {"key": "note", "name": "备注", "required": False, "type": "text"},
     ],
 }
 
-
 SCHEMA = """
 PRAGMA foreign_keys = ON;
 
+CREATE TABLE IF NOT EXISTS projects (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    project_name TEXT NOT NULL UNIQUE,
+    status TEXT NOT NULL CHECK(status IN ('active', 'disabled')),
+    remark TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS warehouses (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    warehouse_name TEXT NOT NULL UNIQUE,
+    address TEXT,
+    contact_name TEXT,
+    contact_phone TEXT,
+    status TEXT NOT NULL CHECK(status IN ('active', 'disabled')),
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS warehouse_locations (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    warehouse_id INTEGER NOT NULL REFERENCES warehouses(id),
+    storage_area TEXT NOT NULL,
+    cargo_area TEXT NOT NULL,
+    location_name TEXT NOT NULL,
+    status TEXT NOT NULL CHECK(status IN ('active', 'disabled')),
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE(warehouse_id, storage_area, cargo_area, location_name)
+);
+
 CREATE TABLE IF NOT EXISTS users (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    phone TEXT NOT NULL UNIQUE,
+    username TEXT NOT NULL UNIQUE,
+    display_name TEXT NOT NULL,
+    contact_phone TEXT,
     password_hash TEXT NOT NULL,
-    role TEXT NOT NULL CHECK(role IN ('admin', 'worker')),
+    role TEXT NOT NULL CHECK(role IN ('admin', 'project_admin')),
     status TEXT NOT NULL CHECK(status IN ('active', 'disabled')),
     must_change_password INTEGER NOT NULL DEFAULT 1,
     failed_attempts INTEGER NOT NULL DEFAULT 0,
     locked_until TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS user_projects (
+    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY(user_id, project_id)
 );
 
 CREATE TABLE IF NOT EXISTS sessions (
@@ -59,28 +105,38 @@ CREATE TABLE IF NOT EXISTS products (
     product_id TEXT PRIMARY KEY,
     product_name TEXT NOT NULL,
     spec TEXT,
+    unit TEXT,
+    status TEXT NOT NULL DEFAULT 'active' CHECK(status IN ('active', 'disabled')),
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS inventory (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
+    project_id INTEGER NOT NULL REFERENCES projects(id),
     product_id TEXT NOT NULL REFERENCES products(product_id),
+    location_id INTEGER NOT NULL REFERENCES warehouse_locations(id),
     batch_no TEXT NOT NULL,
-    location TEXT NOT NULL,
-    quantity INTEGER NOT NULL CHECK(quantity >= 0),
     production_date TEXT,
-    shelf_life_days INTEGER,
+    expiry_date TEXT,
+    inbound_date TEXT,
+    total_quantity INTEGER NOT NULL CHECK(total_quantity >= 0),
+    picking_reserved INTEGER NOT NULL DEFAULT 0 CHECK(picking_reserved >= 0),
+    moving_reserved INTEGER NOT NULL DEFAULT 0 CHECK(moving_reserved >= 0),
+    quality_status TEXT NOT NULL DEFAULT '良品',
+    prohibit_outbound INTEGER NOT NULL DEFAULT 0 CHECK(prohibit_outbound IN (0, 1)),
+    purchase_order_no TEXT,
     last_inbound_at TEXT NOT NULL,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
-    UNIQUE(product_id, batch_no, location)
+    UNIQUE(project_id, product_id, location_id, batch_no)
 );
 
 CREATE TABLE IF NOT EXISTS stock_orders (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
+    project_id INTEGER NOT NULL REFERENCES projects(id),
     order_no TEXT NOT NULL UNIQUE,
-    order_type TEXT NOT NULL CHECK(order_type IN ('inbound', 'outbound')),
+    order_type TEXT NOT NULL CHECK(order_type IN ('inbound', 'outbound', 'history_import')),
     status TEXT NOT NULL CHECK(status IN ('pending_picking', 'completed')),
     operator_id INTEGER NOT NULL REFERENCES users(id),
     operator_name TEXT NOT NULL,
@@ -98,7 +154,7 @@ CREATE TABLE IF NOT EXISTS stock_order_items (
     product_name TEXT NOT NULL,
     spec TEXT,
     batch_no TEXT,
-    location TEXT,
+    location_id INTEGER,
     quantity INTEGER NOT NULL CHECK(quantity > 0),
     note TEXT,
     created_at TEXT NOT NULL
@@ -106,11 +162,12 @@ CREATE TABLE IF NOT EXISTS stock_order_items (
 
 CREATE TABLE IF NOT EXISTS stock_logs (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
+    project_id INTEGER NOT NULL REFERENCES projects(id),
     order_no TEXT NOT NULL,
     product_id TEXT NOT NULL,
     batch_no TEXT NOT NULL,
-    location TEXT NOT NULL,
-    change_type TEXT NOT NULL CHECK(change_type IN ('inbound', 'outbound')),
+    location_id INTEGER NOT NULL REFERENCES warehouse_locations(id),
+    change_type TEXT NOT NULL CHECK(change_type IN ('inbound', 'outbound', 'history_import')),
     change_quantity INTEGER NOT NULL,
     operator_name TEXT NOT NULL,
     created_at TEXT NOT NULL
@@ -119,6 +176,7 @@ CREATE TABLE IF NOT EXISTS stock_logs (
 CREATE TABLE IF NOT EXISTS picking_orders (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     pick_no TEXT NOT NULL UNIQUE,
+    project_id INTEGER NOT NULL REFERENCES projects(id),
     order_id INTEGER NOT NULL UNIQUE REFERENCES stock_orders(id) ON DELETE CASCADE,
     status TEXT NOT NULL CHECK(status IN ('pending', 'completed')),
     operator_name TEXT NOT NULL,
@@ -134,35 +192,48 @@ CREATE TABLE IF NOT EXISTS picking_items (
     spec TEXT,
     batch_no TEXT NOT NULL,
     quantity INTEGER NOT NULL CHECK(quantity > 0),
-    location TEXT NOT NULL,
+    location_id INTEGER NOT NULL REFERENCES warehouse_locations(id),
     sequence INTEGER NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS templates (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    template_type TEXT NOT NULL UNIQUE CHECK(template_type IN ('inbound', 'outbound')),
+    project_id INTEGER NOT NULL REFERENCES projects(id),
+    template_type TEXT NOT NULL CHECK(template_type IN ('inbound', 'outbound')),
     version INTEGER NOT NULL,
     columns_json TEXT NOT NULL,
     status TEXT NOT NULL DEFAULT 'active' CHECK(status IN ('active', 'disabled')),
-    updated_at TEXT NOT NULL
+    updated_at TEXT NOT NULL,
+    UNIQUE(project_id, template_type)
 );
 
 CREATE TABLE IF NOT EXISTS audit_logs (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
+    project_id INTEGER REFERENCES projects(id),
     user_id INTEGER,
     user_name TEXT NOT NULL,
     action TEXT NOT NULL,
     detail TEXT,
     created_at TEXT NOT NULL
 );
+"""
 
-CREATE INDEX IF NOT EXISTS idx_inventory_product ON inventory(product_id);
-CREATE INDEX IF NOT EXISTS idx_orders_type_time ON stock_orders(order_type, created_at);
+INDEXES = """
+CREATE INDEX IF NOT EXISTS idx_locations_warehouse
+    ON warehouse_locations(warehouse_id, storage_area, cargo_area, location_name);
+CREATE INDEX IF NOT EXISTS idx_user_projects_project ON user_projects(project_id);
+CREATE INDEX IF NOT EXISTS idx_inventory_project_product
+    ON inventory(project_id, product_id);
+CREATE INDEX IF NOT EXISTS idx_orders_project_time ON stock_orders(project_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_order_items_order ON stock_order_items(order_id);
-CREATE INDEX IF NOT EXISTS idx_stock_logs_product ON stock_logs(product_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_stock_logs_project_product
+    ON stock_logs(project_id, product_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_picking_orders_order ON picking_orders(order_id);
+CREATE INDEX IF NOT EXISTS idx_picking_orders_project ON picking_orders(project_id);
+CREATE INDEX IF NOT EXISTS idx_templates_project ON templates(project_id, template_type);
 CREATE INDEX IF NOT EXISTS idx_sessions_expiry ON sessions(expires_at);
-CREATE INDEX IF NOT EXISTS idx_audit_logs_time ON audit_logs(created_at);
+CREATE INDEX IF NOT EXISTS idx_audit_logs_project_time
+    ON audit_logs(project_id, created_at);
 """
 
 
@@ -181,44 +252,321 @@ def connect(path=None):
     return connection
 
 
+def _columns(connection, table):
+    return {row[1] for row in connection.execute(f"PRAGMA table_info({table})")}
+
+
+def _rows(connection, table):
+    return [dict(row) for row in connection.execute(f"SELECT * FROM {table}")]
+
+
+def _parse_date(value):
+    if not value:
+        return None
+    for pattern in ("%Y-%m-%d", "%Y/%m/%d"):
+        try:
+            return datetime.strptime(str(value)[:10], pattern).date()
+        except ValueError:
+            pass
+    return None
+
+
+def _ensure_location(connection, warehouse_id, location_name, created_at):
+    location = str(location_name or "").strip() or "默认货位"
+    row = connection.execute(
+        """SELECT id FROM warehouse_locations
+           WHERE warehouse_id = ? AND storage_area = '默认库区'
+             AND cargo_area = '默认货区' AND location_name = ?""",
+        (warehouse_id, location),
+    ).fetchone()
+    if row:
+        return row["id"]
+    cursor = connection.execute(
+        """INSERT INTO warehouse_locations
+           (warehouse_id, storage_area, cargo_area, location_name, status,
+            created_at, updated_at)
+           VALUES (?, '默认库区', '默认货区', ?, 'active', ?, ?)""",
+        (warehouse_id, location, created_at, created_at),
+    )
+    return cursor.lastrowid
+
+
+def _migrate_legacy(connection):
+    """Rebuild V1 tables and move all historical data into the default project."""
+    table_names = {
+        "sessions", "inventory", "stock_order_items", "picking_items",
+        "picking_orders", "stock_orders", "stock_logs", "templates",
+        "audit_logs", "user_projects", "users", "products",
+        "warehouse_locations", "warehouses", "projects",
+    }
+    existing = {
+        row[0] for row in connection.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table'"
+        )
+    }
+    data = {name: _rows(connection, name) for name in table_names & existing}
+
+    connection.execute("PRAGMA foreign_keys = OFF")
+    connection.commit()
+    connection.execute("BEGIN IMMEDIATE")
+    for name in table_names & existing:
+        connection.execute(f"DROP TABLE {name}")
+    connection.executescript(SCHEMA)
+    sql_now = "datetime('now')"
+    migration_now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+    connection.execute(
+        f"""INSERT INTO projects(project_name, status, remark, created_at, updated_at)
+            VALUES ('默认项目', 'active', 'V1数据迁移项目', {sql_now}, {sql_now})"""
+    )
+    project_id = connection.execute("SELECT last_insert_rowid()").fetchone()[0]
+    connection.execute(
+        f"""INSERT INTO warehouses(warehouse_name, status, created_at, updated_at)
+            VALUES ('默认仓库', 'active', {sql_now}, {sql_now})"""
+    )
+    warehouse_id = connection.execute("SELECT last_insert_rowid()").fetchone()[0]
+
+    admin_configured = False
+    for row in data.get("users", []):
+        role = "admin" if row["role"] == "admin" else "project_admin"
+        if role == "admin" and not admin_configured:
+            username = os.environ.get("WMS_ADMIN_USERNAME", "admin")
+            display_name = os.environ.get("WMS_ADMIN_NAME", "管理员")
+            admin_configured = True
+        else:
+            username = f"user{row['id']}"
+            display_name = f"用户{row['id']}"
+        connection.execute(
+            """INSERT INTO users
+               (id, username, display_name, contact_phone, password_hash, role,
+                status, must_change_password, failed_attempts, locked_until,
+                created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                row["id"], username, display_name, row.get("phone"),
+                row["password_hash"], role, row["status"],
+                row["must_change_password"], row["failed_attempts"],
+                row["locked_until"], row["created_at"], row["updated_at"],
+            ),
+        )
+        if role == "project_admin":
+            connection.execute(
+                f"""INSERT INTO user_projects(user_id, project_id, created_at)
+                    VALUES (?, ?, {sql_now})""",
+                (row["id"], project_id),
+            )
+
+    for row in data.get("sessions", []):
+        connection.execute(
+            """INSERT INTO sessions(token_hash, user_id, expires_at, created_at)
+               VALUES (?, ?, ?, ?)""",
+            (row["token_hash"], row["user_id"], row["expires_at"], row["created_at"]),
+        )
+
+    for row in data.get("products", []):
+        connection.execute(
+            """INSERT INTO products
+               (product_id, product_name, spec, unit, status, created_at, updated_at)
+               VALUES (?, ?, ?, NULL, 'active', ?, ?)""",
+            (row["product_id"], row["product_name"], row["spec"],
+             row["created_at"], row["updated_at"]),
+        )
+
+    location_ids = {}
+    for row in data.get("inventory", []):
+        location_ids[row["location"]] = _ensure_location(
+            connection, warehouse_id, row["location"], row["created_at"]
+        )
+        production = _parse_date(row.get("production_date"))
+        expiry = None
+        if production and row.get("shelf_life_days") is not None:
+            try:
+                expiry = (production + timedelta(days=int(row["shelf_life_days"]))).isoformat()
+            except (TypeError, ValueError):
+                expiry = None
+        connection.execute(
+            """INSERT INTO inventory
+               (project_id, product_id, location_id, batch_no, production_date,
+                expiry_date, inbound_date, total_quantity, picking_reserved,
+                moving_reserved, quality_status, prohibit_outbound,
+                purchase_order_no, last_inbound_at, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, 0, '良品', 0, NULL, ?, ?, ?)""",
+            (
+                project_id, row["product_id"], location_ids[row["location"]],
+                row["batch_no"], production.isoformat() if production else None,
+                expiry, row["last_inbound_at"][:10], row["quantity"],
+                row["last_inbound_at"], row["created_at"], row["updated_at"],
+            ),
+        )
+
+    for row in data.get("stock_orders", []):
+        connection.execute(
+            """INSERT INTO stock_orders
+               (id, project_id, order_no, order_type, status, operator_id,
+                operator_name, template_version, note, created_at, completed_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                row["id"], project_id, row["order_no"], row["order_type"],
+                row["status"], row["operator_id"], row["operator_name"],
+                row["template_version"], row["note"], row["created_at"],
+                row["completed_at"],
+            ),
+        )
+    for row in data.get("stock_order_items", []):
+        location_id = None
+        if row.get("location"):
+            location_id = location_ids.setdefault(
+                row["location"],
+                _ensure_location(connection, warehouse_id, row["location"], row["created_at"]),
+            )
+        connection.execute(
+            """INSERT INTO stock_order_items
+               (order_id, row_no, product_id, product_name, spec, batch_no,
+                location_id, quantity, note, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                row["order_id"], row["row_no"], row["product_id"],
+                row["product_name"], row["spec"], row["batch_no"], location_id,
+                row["quantity"], row["note"], row["created_at"],
+            ),
+        )
+    for row in data.get("stock_logs", []):
+        location_id = location_ids.setdefault(
+            row["location"],
+            _ensure_location(connection, warehouse_id, row["location"], row["created_at"]),
+        )
+        connection.execute(
+            """INSERT INTO stock_logs
+               (project_id, order_no, product_id, batch_no, location_id,
+                change_type, change_quantity, operator_name, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                project_id, row["order_no"], row["product_id"], row["batch_no"],
+                location_id, row["change_type"], row["change_quantity"],
+                row["operator_name"], row["created_at"],
+            ),
+        )
+    for row in data.get("picking_orders", []):
+        connection.execute(
+            """INSERT INTO picking_orders
+               (id, pick_no, project_id, order_id, status, operator_name,
+                generated_at, completed_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                row["id"], row["pick_no"], project_id, row["order_id"],
+                row["status"], row["operator_name"], row["generated_at"],
+                row["completed_at"],
+            ),
+        )
+    for row in data.get("picking_items", []):
+        location_id = location_ids.setdefault(
+            row["location"],
+            _ensure_location(connection, warehouse_id, row["location"], migration_now),
+        )
+        connection.execute(
+            """INSERT INTO picking_items
+               (picking_order_id, product_id, product_name, spec, batch_no,
+                quantity, location_id, sequence)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                row["picking_order_id"], row["product_id"], row["product_name"],
+                row["spec"], row["batch_no"], row["quantity"], location_id,
+                row["sequence"],
+            ),
+        )
+
+    for row in data.get("templates", []):
+        connection.execute(
+            """INSERT INTO templates
+               (project_id, template_type, version, columns_json, status, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            (
+                project_id, row["template_type"], row["version"],
+                row["columns_json"], row["status"], row["updated_at"],
+            ),
+        )
+    for row in data.get("audit_logs", []):
+        connection.execute(
+            """INSERT INTO audit_logs
+               (project_id, user_id, user_name, action, detail, created_at)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            (
+                project_id, row["user_id"], row["user_name"], row["action"],
+                row["detail"], row["created_at"],
+            ),
+        )
+
+    for template_type, columns in DEFAULT_TEMPLATES.items():
+        connection.execute(
+            """INSERT INTO templates
+               (project_id, template_type, version, columns_json, status, updated_at)
+               VALUES (?, ?, 1, ?, 'active', datetime('now'))
+               ON CONFLICT(project_id, template_type) DO UPDATE SET
+                   columns_json = excluded.columns_json""",
+            (project_id, template_type, json.dumps(columns, ensure_ascii=False)),
+        )
+    connection.commit()
+    connection.execute("PRAGMA foreign_keys = ON")
+
+
 def init_db(path=None):
     connection = connect(path)
     try:
+        user_columns = _columns(connection, "users")
+        if user_columns and "username" not in user_columns:
+            _migrate_legacy(connection)
+            connection.executescript(INDEXES)
+            return
+
         with connection:
             connection.executescript(SCHEMA)
-            template_columns = {
-                row[1] for row in connection.execute("PRAGMA table_info(templates)")
-            }
-            if "status" not in template_columns:
+            if connection.execute("SELECT COUNT(*) FROM projects").fetchone()[0] == 0:
                 connection.execute(
-                    "ALTER TABLE templates ADD COLUMN status TEXT NOT NULL DEFAULT 'active'"
+                    """INSERT INTO projects
+                       (project_name, status, remark, created_at, updated_at)
+                       VALUES ('默认项目', 'active', '系统初始化项目',
+                               datetime('now'), datetime('now'))"""
                 )
-            for template_type, columns in DEFAULT_TEMPLATES.items():
+            if connection.execute("SELECT COUNT(*) FROM warehouses").fetchone()[0] == 0:
                 connection.execute(
-                    """INSERT OR IGNORE INTO templates
-                       (template_type, version, columns_json, updated_at)
-                       VALUES (?, 1, ?, datetime('now'))""",
-                    (template_type, json.dumps(columns, ensure_ascii=False)),
+                    """INSERT INTO warehouses
+                       (warehouse_name, status, created_at, updated_at)
+                       VALUES ('默认仓库', 'active',
+                               datetime('now'), datetime('now'))"""
                 )
+            for project in connection.execute("SELECT id FROM projects").fetchall():
+                for template_type, columns in DEFAULT_TEMPLATES.items():
+                    connection.execute(
+                        """INSERT INTO templates
+                           (project_id, template_type, version, columns_json,
+                            status, updated_at)
+                           VALUES (?, ?, 1, ?, 'active', datetime('now'))
+                           ON CONFLICT(project_id, template_type) DO NOTHING""",
+                        (project["id"], template_type,
+                         json.dumps(columns, ensure_ascii=False)),
+                    )
             if connection.execute("SELECT COUNT(*) FROM users").fetchone()[0] == 0:
-                phone = os.environ.get("WMS_ADMIN_PHONE", "13800000000")
+                username = os.environ.get("WMS_ADMIN_USERNAME", "admin")
+                display_name = os.environ.get("WMS_ADMIN_NAME", "管理员")
+                contact_phone = os.environ.get("WMS_ADMIN_CONTACT_PHONE")
                 password = os.environ.get("WMS_ADMIN_PASSWORD", "Admin123456")
                 connection.execute(
                     """INSERT INTO users
-                       (phone, password_hash, role, status, must_change_password,
-                        created_at, updated_at)
-                       VALUES (?, ?, 'admin', 'active', 1,
+                       (username, display_name, contact_phone, password_hash, role,
+                        status, must_change_password, created_at, updated_at)
+                       VALUES (?, ?, ?, ?, 'admin', 'active', 1,
                                datetime('now'), datetime('now'))""",
-                    (phone, hash_password(password)),
+                    (username, display_name, contact_phone, hash_password(password)),
                 )
+            connection.executescript(INDEXES)
     finally:
         connection.close()
 
 
-def columns_for(connection, template_type):
+def columns_for(connection, template_type, project_id):
     row = connection.execute(
-        "SELECT version, columns_json FROM templates WHERE template_type = ?",
-        (template_type,),
+        """SELECT version, columns_json FROM templates
+           WHERE project_id = ? AND template_type = ?""",
+        (project_id, template_type),
     ).fetchone()
     if not row:
         raise ValueError("模板不存在")

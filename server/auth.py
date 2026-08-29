@@ -1,6 +1,5 @@
 import re
 
-from db import connect
 from security import (
     iso_in,
     iso_now,
@@ -11,13 +10,16 @@ from security import (
 )
 
 
+USERNAME_PATTERN = re.compile(r"^[a-z]{2,50}$")
 PHONE_PATTERN = re.compile(r"^1[3-9]\d{9}$")
 
 
 def public_user(row):
     return {
         "id": row["id"],
-        "phone": row["phone"],
+        "username": row["username"],
+        "displayName": row["display_name"],
+        "contactPhone": row["contact_phone"],
         "role": row["role"],
         "status": row["status"],
         "mustChangePassword": bool(row["must_change_password"]),
@@ -25,15 +27,19 @@ def public_user(row):
     }
 
 
+def valid_username(username):
+    return bool(USERNAME_PATTERN.fullmatch(username or ""))
+
+
 def valid_phone(phone):
-    return bool(PHONE_PATTERN.fullmatch(phone or ""))
+    return phone in (None, "") or bool(PHONE_PATTERN.fullmatch(phone or ""))
 
 
-def login(connection, phone, password):
+def login(connection, username, password):
     row = connection.execute(
-        "SELECT * FROM users WHERE phone = ?", (phone or "",)
+        "SELECT * FROM users WHERE username = ?", ((username or "").strip(),)
     ).fetchone()
-    generic_error = ValueError("手机号或密码错误")
+    generic_error = ValueError("用户名或密码错误")
     if row is None:
         raise generic_error
 
@@ -54,8 +60,7 @@ def login(connection, phone, password):
         locked_until = iso_in(minutes=10) if attempts >= 5 else None
         connection.execute(
             """UPDATE users
-               SET failed_attempts = ?, locked_until = ?,
-                   updated_at = datetime('now')
+               SET failed_attempts = ?, locked_until = ?, updated_at = datetime('now')
                WHERE id = ?""",
             (attempts, locked_until, row["id"]),
         )
@@ -104,9 +109,7 @@ def logout(connection, token):
     connection.commit()
 
 
-def change_password(
-    connection, user, old_password, new_password, active_token=""
-):
+def change_password(connection, user, old_password, new_password, active_token=""):
     row = connection.execute(
         "SELECT * FROM users WHERE id = ?", (user["id"],)
     ).fetchone()
@@ -114,15 +117,15 @@ def change_password(
         raise ValueError("原密码错误")
     if old_password == new_password:
         raise ValueError("新密码不能与原密码相同")
+
     from security import hash_password, valid_password
 
     if not valid_password(new_password):
         raise ValueError("密码须为8-20位，且同时包含字母和数字")
-    now = iso_now()
     connection.execute(
         """UPDATE users SET password_hash = ?, must_change_password = 0,
            updated_at = ? WHERE id = ?""",
-        (hash_password(new_password), now, user["id"]),
+        (hash_password(new_password), iso_now(), user["id"]),
     )
     connection.execute(
         "DELETE FROM sessions WHERE user_id = ? AND token_hash != ?",

@@ -4,17 +4,13 @@ set -eu
 usage() {
   cat <<'USAGE'
 Usage:
-  ./deploy.sh <company-key> [server-ip]
+  ./deploy.sh <company-key> [server-ip] [admin-name] [admin-username]
 
-Company key:
-  lowercase letters, numbers, and hyphens; maximum 32 characters.
-  "default" is the original single-company installation.
+Example:
+  ./deploy.sh acme 193.112.26.217 张三 zhangsan
 
-First/default company:
-  COMPANY_NAME="Acme" WMS_ADMIN_PHONE=13812345678 ./deploy.sh default 193.112.26.217
-
-Additional company:
-  APP_PORT=8001 PUBLIC_PORT=8081 COMPANY_NAME="Beta" WMS_ADMIN_PHONE=13912345678 ./deploy.sh beta 193.112.26.217
+company-key must be lowercase English letters, numbers, or hyphens.
+admin-name and admin-username are required only for the first deployment.
 USAGE
 }
 
@@ -23,104 +19,109 @@ if [ "${1:-}" = "-h" ] || [ "${1:-}" = "--help" ]; then
   exit 0
 fi
 
-COMPANY_KEY=${1:-default}
+COMPANY_KEY=${1:-}
 REMOTE_HOST=${2:-193.112.26.217}
+ADMIN_NAME=${3:-}
+ADMIN_USERNAME=${4:-}
 SSH_TARGET="ubuntu@$REMOTE_HOST"
-COMPANY_NAME=${COMPANY_NAME:-}
 
 case "$COMPANY_KEY" in
-  default) ;;
   ''|-*|*-|[!a-z0-9-]*|*[!a-z0-9-]*)
-    echo "Invalid company key: $COMPANY_KEY" >&2
+    echo "company-key invalid: use lowercase English letters, numbers, or hyphens" >&2
     usage
     exit 1
     ;;
 esac
-
 if [ "${#COMPANY_KEY}" -gt 32 ]; then
-  echo "Company key must be at most 32 characters." >&2
+  echo "company-key must be at most 32 characters" >&2
   exit 1
 fi
-
-if [ -z "$COMPANY_NAME" ]; then
-  echo "COMPANY_NAME is required, for example COMPANY_NAME=\"Acme\"." >&2
-  exit 1
+if [ "${APP_PORT:-}" ]; then
+  case "$APP_PORT" in
+    *[!0-9]*|'') echo "APP_PORT must be a number" >&2; exit 1 ;;
+  esac
 fi
-
-case "$COMPANY_NAME" in
-  ''|' '*|*' '*|*[!A-Za-z0-9.,\ -]*)
-    echo "COMPANY_NAME must use English letters, numbers, spaces, or . , - only." >&2
-    exit 1
-    ;;
-esac
-
-if [ "$COMPANY_KEY" = "default" ]; then
-  REMOTE_DIR=${REMOTE_DIR:-/opt/wms}
-  SERVICE_NAME=wms
-  ENV_FILE=/etc/wms/wms.env
-  NGINX_SITE=wms
-  APP_PORT=${APP_PORT:-8000}
-  PUBLIC_PORT=${PUBLIC_PORT:-80}
-else
-  REMOTE_DIR=${REMOTE_DIR:-/opt/wms-$COMPANY_KEY}
-  SERVICE_NAME=wms-$COMPANY_KEY
-  ENV_FILE=/etc/wms/$COMPANY_KEY.env
-  NGINX_SITE=wms-$COMPANY_KEY
-  : "${APP_PORT:?Set APP_PORT, for example APP_PORT=8001}"
-  : "${PUBLIC_PORT:?Set PUBLIC_PORT, for example PUBLIC_PORT=8081}"
-fi
-
-if [ -z "${WMS_ADMIN_PHONE:-}" ]; then
-  echo "WMS_ADMIN_PHONE is required." >&2
-  exit 1
-fi
-ADMIN_PHONE="$WMS_ADMIN_PHONE"
 
 echo "==> Checking SSH access"
 ssh -o BatchMode=yes "$SSH_TARGET" "id && test -f /etc/os-release"
 
-echo "==> Checking whether this is an initial deployment"
-DB_EXISTS=no
-if ssh "$SSH_TARGET" "test -f '$REMOTE_DIR/data/warehouse.db'"; then
-  DB_EXISTS=yes
-fi
-
-if [ "$DB_EXISTS" = "no" ] && [ -z "${WMS_ADMIN_PASSWORD:-}" ]; then
-  ADMIN_PASSWORD="$(openssl rand -base64 18 | tr +/ Aa)"
-  SHOW_PASSWORD=1
-else
-  ADMIN_PASSWORD="${WMS_ADMIN_PASSWORD:-unused-for-existing-database}"
-  SHOW_PASSWORD=0
-fi
-
-echo "==> Installing system dependencies"
+echo "==> Preparing server"
 ssh "$SSH_TARGET" '
   set -eu
   export DEBIAN_FRONTEND=noninteractive
   sudo apt-get update -qq
-  sudo apt-get install -y -qq python3 nginx sqlite3 rsync curl >/dev/null
+  sudo apt-get install -y -qq python3 nginx sqlite3 rsync curl openssl >/dev/null
 '
+
+DB_EXISTS=no
+REMOTE_DIR="/opt/wms-$COMPANY_KEY"
+SERVICE_NAME="wms-$COMPANY_KEY"
+ENV_FILE="/etc/wms/$COMPANY_KEY.env"
+if ssh "$SSH_TARGET" "test -f '$REMOTE_DIR/data/warehouse.db'"; then
+  DB_EXISTS=yes
+fi
+
+if [ "$DB_EXISTS" = "no" ]; then
+  if [ -z "$ADMIN_NAME" ] || [ -z "$ADMIN_USERNAME" ]; then
+    echo "First deployment needs admin-name and admin-username." >&2
+    usage
+    exit 1
+  fi
+  if [ -z "${WMS_ADMIN_PASSWORD:-}" ]; then
+    ADMIN_PASSWORD="$(openssl rand -base64 18 | tr +/ Aa)"
+    SHOW_PASSWORD=1
+  else
+    ADMIN_PASSWORD="$WMS_ADMIN_PASSWORD"
+    SHOW_PASSWORD=0
+  fi
+else
+  ADMIN_PASSWORD="unused-for-existing-database"
+  SHOW_PASSWORD=0
+fi
+
+if [ -z "${APP_PORT:-}" ]; then
+  if [ "$DB_EXISTS" = yes ]; then
+    APP_PORT=$(ssh "$SSH_TARGET" "awk -F= '\$1 == \"WMS_APP_PORT\" {print \$2}' '$ENV_FILE'")
+  fi
+fi
+
+if [ -z "${APP_PORT:-}" ]; then
+  APP_PORT=$(ssh "$SSH_TARGET" '
+    set -eu
+    for port in $(seq 8000 8100); do
+      used=no
+      for file in /etc/wms/*.env; do
+        [ -e "$file" ] || continue
+        if grep -q "^WMS_APP_PORT=$port$" "$file"; then used=yes; break; fi
+      done
+      if [ "$used" = no ] && ! ss -atn | grep -Eq "[[:space:]]:$port[[:space:]]"; then
+        echo "$port"
+        exit 0
+      fi
+    done
+    exit 1
+  ')
+fi
 
 echo "==> Uploading application"
 rsync -az --delete \
+  --exclude '.git/' \
   --exclude '.pycache/' \
   --exclude '__pycache__/' \
   --exclude 'data/' \
   --exclude '.DS_Store' \
-./ "$SSH_TARGET:/tmp/wms-next/"
+  ./ "$SSH_TARGET:/tmp/wms-$COMPANY_KEY/"
 
 echo "==> Installing company instance"
 ssh "$SSH_TARGET" \
-  "sudo env COMPANY_KEY='$COMPANY_KEY' COMPANY_NAME='$COMPANY_NAME' \
-   REMOTE_DIR='$REMOTE_DIR' ENV_FILE='$ENV_FILE' APP_PORT='$APP_PORT' \
-   SERVICE_NAME='$SERVICE_NAME' NGINX_SITE='$NGINX_SITE' \
-   PUBLIC_PORT='$PUBLIC_PORT' \
-   ADMIN_PHONE='$ADMIN_PHONE' ADMIN_PASSWORD='$ADMIN_PASSWORD' \
-   DB_EXISTS='$DB_EXISTS' sh -s" <<'REMOTE'
+  "sudo env COMPANY_KEY='$COMPANY_KEY' REMOTE_DIR='$REMOTE_DIR' \
+   SERVICE_NAME='$SERVICE_NAME' ENV_FILE='$ENV_FILE' APP_PORT='$APP_PORT' \
+   ADMIN_NAME='$ADMIN_NAME' ADMIN_USERNAME='$ADMIN_USERNAME' \
+   ADMIN_PASSWORD='$ADMIN_PASSWORD' DB_EXISTS='$DB_EXISTS' sh -s" <<'REMOTE'
 set -eu
 
 mkdir -p "$REMOTE_DIR"
-if [ "$DB_EXISTS" = "yes" ] && [ -f "$REMOTE_DIR/data/warehouse.db" ]; then
+if [ "$DB_EXISTS" = yes ] && [ -f "$REMOTE_DIR/data/warehouse.db" ]; then
   mkdir -p "$REMOTE_DIR/data/backups"
   backup="$REMOTE_DIR/data/backups/before-$(date +%Y%m%d-%H%M%S).db"
   sqlite3 "$REMOTE_DIR/data/warehouse.db" ".backup '$backup'"
@@ -130,25 +131,29 @@ rsync -a --delete \
   --exclude data \
   --exclude .pycache \
   --exclude __pycache__ \
-  /tmp/wms-next/ "$REMOTE_DIR/"
-rm -rf /tmp/wms-next
+  "/tmp/wms-$COMPANY_KEY/" "$REMOTE_DIR/"
+rm -rf "/tmp/wms-$COMPANY_KEY"
 mkdir -p "$REMOTE_DIR/data"
 install -d -m 700 /etc/wms
 
 if [ ! -f "$ENV_FILE" ]; then
   umask 077
   cat > "$ENV_FILE" <<ENV
-WMS_ADMIN_PHONE=$ADMIN_PHONE
+WMS_COMPANY_KEY=$COMPANY_KEY
+WMS_APP_PORT=$APP_PORT
+WMS_BASE_PATH=/$COMPANY_KEY
+WMS_ADMIN_NAME=$ADMIN_NAME
+WMS_ADMIN_USERNAME=$ADMIN_USERNAME
 WMS_ADMIN_PASSWORD=$ADMIN_PASSWORD
-WMS_COMPANY_NAME=$COMPANY_NAME
 ENV
 fi
-
+chown root:root "$ENV_FILE"
+chmod 600 "$ENV_FILE"
 chown -R www-data:www-data "$REMOTE_DIR"
 
 cat > "/etc/systemd/system/${SERVICE_NAME}.service" <<SERVICE
 [Unit]
-Description=Warehouse Management System - $COMPANY_NAME
+Description=Warehouse Management System - $COMPANY_KEY
 After=network.target
 
 [Service]
@@ -157,7 +162,7 @@ User=www-data
 Group=www-data
 WorkingDirectory=$REMOTE_DIR
 EnvironmentFile=$ENV_FILE
-ExecStart=/usr/bin/python3 $REMOTE_DIR/server/main.py --host 127.0.0.1 --port $APP_PORT --db $REMOTE_DIR/data/warehouse.db
+ExecStart=/usr/bin/python3 $REMOTE_DIR/server/main.py --host 127.0.0.1 --port $APP_PORT --db $REMOTE_DIR/data/warehouse.db --base-path /$COMPANY_KEY
 Restart=always
 RestartSec=3
 NoNewPrivileges=true
@@ -169,28 +174,32 @@ ReadWritePaths=$REMOTE_DIR/data
 WantedBy=multi-user.target
 SERVICE
 
-cat > "/etc/nginx/sites-available/$NGINX_SITE" <<NGINX
-server {
-    listen $PUBLIC_PORT default_server;
-    server_name _;
-    client_max_body_size 8m;
+sudo mkdir -p /etc/nginx/wms-routes
+cat > "/etc/nginx/wms-routes/$COMPANY_KEY.conf" <<ROUTE
+location = /$COMPANY_KEY {
+    return 308 /$COMPANY_KEY/;
+}
 
-    location / {
-        proxy_pass http://127.0.0.1:$APP_PORT;
-        proxy_http_version 1.1;
-        proxy_set_header Host \$host;
-        proxy_set_header X-Real-IP \$remote_addr;
-        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto \$scheme;
-    }
+location ^~ /$COMPANY_KEY/ {
+    proxy_pass http://127.0.0.1:$APP_PORT;
+    proxy_http_version 1.1;
+    proxy_set_header Host \$host;
+    proxy_set_header X-Real-IP \$remote_addr;
+    proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto \$scheme;
+}
+ROUTE
+
+cat > /etc/nginx/sites-available/wms <<NGINX
+server {
+    listen 80 default_server;
+    server_name _;
+    client_max_body_size 16m;
+    include /etc/nginx/wms-routes/*.conf;
 }
 NGINX
-
-ln -sfn "/etc/nginx/sites-available/$NGINX_SITE" \
-  "/etc/nginx/sites-enabled/$NGINX_SITE"
-if [ "$COMPANY_KEY" = "default" ]; then
-  rm -f /etc/nginx/sites-enabled/default
-fi
+ln -sfn /etc/nginx/sites-available/wms /etc/nginx/sites-enabled/wms
+rm -f /etc/nginx/sites-enabled/default
 
 nginx -t
 systemctl daemon-reload
@@ -205,15 +214,14 @@ ssh "$SSH_TARGET" \
 
 echo "==> Health check"
 ssh "$SSH_TARGET" \
-  "for i in 1 2 3 4 5; do curl -fsS http://127.0.0.1:$APP_PORT/api/health && exit 0; sleep 1; done; exit 1"
+  "for i in 1 2 3 4 5 6 7 8 9 10; do curl -fsS 'http://127.0.0.1:$APP_PORT/$COMPANY_KEY/api/health' && exit 0; sleep 1; done; exit 1"
 echo
 
 if [ "$SHOW_PASSWORD" -eq 1 ]; then
   echo "==> Initial admin credentials, shown only once:"
-  echo "company: $COMPANY_NAME"
-  echo "phone: $ADMIN_PHONE"
+  echo "username: $ADMIN_USERNAME"
   echo "password: $ADMIN_PASSWORD"
   echo "Change the password immediately after first login."
 fi
 
-echo "==> Deployment complete: http://$REMOTE_HOST:$PUBLIC_PORT/"
+echo "==> Deployment complete: http://$REMOTE_HOST/$COMPANY_KEY/"

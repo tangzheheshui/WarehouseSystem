@@ -4,46 +4,56 @@
 
 - 服务器：Ubuntu，IP `193.112.26.217`
 - SSH 用户：`ubuntu`
-- 本机能免密登录：`ssh ubuntu@193.112.26.217`
-- 安全组放行 `22`、`80`；第二家公司部署在 `8081` 时再放行 `8081`
+- 本机能执行：`ssh ubuntu@193.112.26.217`
+- 安全组放行 `22`、`80`
 
-## 部署第一家公司
+## 首次部署
+
+在公司标识、管理员姓名、姓名全拼处替换为自己的值：
 
 ```bash
 cd /Users/feng/code/warehouse-management-system
-COMPANY_NAME="Acme" WMS_ADMIN_PHONE=13812345678 ./deploy.sh default 193.112.26.217
+./deploy.sh acme 193.112.26.217 张三 zhangsan
 ```
 
-首次部署会生成并显示管理员初始密码。访问：
+脚本会自动安装依赖、上传代码、初始化数据库、配置 Nginx 和 systemd，并显示一次性初始密码。
+
+访问：
 
 ```text
-http://193.112.26.217/
+http://193.112.26.217/acme/
 ```
 
-## 部署第二家公司
+## 增加公司
 
 ```bash
-APP_PORT=8001 PUBLIC_PORT=8081 COMPANY_NAME="Beta" WMS_ADMIN_PHONE=13912345678 ./deploy.sh beta 193.112.26.217
+./deploy.sh beta 193.112.26.217 李四 lisi
 ```
 
 访问：
 
 ```text
-http://193.112.26.217:8081/
+http://193.112.26.217/beta/
 ```
 
-`default` 对应 `/opt/wms` 和 `wms.service`；其他公司标识对应 `/opt/wms-公司标识` 和 `wms-公司标识.service`。
+所有公司共用 80 端口；每家公司有独立目录、数据库、服务和内部端口：
+
+| 公司标识 | 应用目录 | 服务 |
+| --- | --- | --- |
+| `acme` | `/opt/wms-acme` | `wms-acme` |
+| `beta` | `/opt/wms-beta` | `wms-beta` |
 
 ## 升级
 
-在本机执行原部署命令即可。脚本会先备份数据库，再上传代码、重启服务、执行测试和健康检查。
+在原目录重新执行原部署命令即可。已有数据库会先自动备份，再升级代码并重启。
 
 ## 排查
 
 ```bash
 ssh ubuntu@193.112.26.217
-systemctl status wms --no-pager
-journalctl -u wms -n 100 --no-pager
+systemctl status wms-acme --no-pager
+journalctl -u wms-acme -n 100 --no-pager
+sudo nginx -t
 ```
 
-第二家公司把 `wms` 换成 `wms-beta` 这类服务名。
+把 `acme` 替换成对应公司标识。

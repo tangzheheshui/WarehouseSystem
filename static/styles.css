@@ -106,6 +106,7 @@ main { min-width: 0; }
   justify-content: space-between;
 }
 .topbar h2 { margin: 0; font-size: 19px; }
+.top-actions { display: flex; align-items: center; gap: 8px; }
 #page { padding: 24px 26px 42px; display: grid; gap: 16px; }
 
 .panel {
@@ -151,6 +152,29 @@ form.toolbar {
   grid-template-columns: repeat(4, minmax(140px, 1fr));
   gap: 11px;
 }
+.fields-row.wide { grid-template-columns: repeat(5, minmax(125px, 1fr)); }
+.table-top { margin-top: 12px; }
+.assignment {
+  margin-top: 12px;
+  display: grid;
+  gap: 8px;
+  color: var(--muted);
+  font-size: 12px;
+}
+.assignment > div {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+.assignment.disabled > div { opacity: .45; pointer-events: none; }
+.assignment .check {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--text);
+  font-size: 13px;
+}
+.assignment .check input { width: 15px; min-height: 15px; }
 label { display: grid; gap: 4px; color: var(--muted); font-size: 12px; }
 input, select, textarea {
   width: 100%;
