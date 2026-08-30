@@ -101,7 +101,7 @@ button, input, select, textarea { font: inherit; }
 }
 .brand-copy {
   display: grid;
-  gap: 5px;
+  gap: 4px;
   min-width: 0;
   line-height: 1.1;
 }
@@ -109,23 +109,22 @@ button, input, select, textarea { font: inherit; }
   color: #fff;
   font-size: 17px;
   font-weight: 750;
-  letter-spacing: -.01em;
+  letter-spacing: 0;
 }
 .project-switcher {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) 18px;
+  display: flex;
   align-items: center;
-  gap: 5px;
+  gap: 6px;
   width: 100%;
-  min-height: 30px;
-  padding: 3px 5px 3px 8px;
-  color: #eaf3fb;
-  background: linear-gradient(90deg, rgba(43,95,168,.48), rgba(15,139,141,.30));
-  border: 1px solid rgba(132,190,246,.42);
-  border-radius: 999px;
-  box-shadow: 0 3px 10px rgba(4,16,30,.22);
+  max-width: 100%;
+  min-height: 28px;
+  padding: 3px 7px;
+  color: #c8d8e6;
+  background: rgba(255,255,255,.05);
+  border: 1px solid rgba(255,255,255,.16);
+  border-radius: 6px;
   font-size: 12px;
-  font-weight: 620;
+  font-weight: 500;
   text-align: left;
   cursor: pointer;
   transition: background .15s ease, border-color .15s ease, color .15s ease;
@@ -133,26 +132,25 @@ button, input, select, textarea { font: inherit; }
 .project-switcher:hover,
 .project-switcher[aria-expanded="true"] {
   color: #fff;
-  background: linear-gradient(90deg, rgba(43,95,168,.78), rgba(15,139,141,.58));
-  border-color: rgba(158,212,255,.68);
-  box-shadow: 0 4px 14px rgba(20,70,120,.34);
+  background: rgba(255,255,255,.11);
+  border-color: rgba(255,255,255,.26);
+}
+.project-switcher:focus-visible {
+  outline: 2px solid rgba(122,170,225,.55);
+  outline-offset: 1px;
 }
 .project-switcher.empty #projectSwitcherName { color: #8ba3ba; }
 #projectSwitcherName {
+  flex: 1 1 auto;
+  min-width: 0;
   overflow: hidden;
   line-height: 1.2;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 .switcher-arrow {
-  display: grid;
-  place-items: center;
-  width: 18px;
-  height: 18px;
-  color: #e7f5ff;
-  background: rgba(255,255,255,.18);
-  border-radius: 50%;
-  font-size: 9px;
+  flex: 0 0 auto;
+  color: #9db4c8;
   transition: transform .15s ease;
 }
 .project-switcher[aria-expanded="true"] .switcher-arrow { transform: rotate(180deg); }
@@ -545,7 +543,7 @@ button[data-tone="slate"] .nav-dot { background: #91a5b8; }
   backdrop-filter: blur(10px);
 }
 .topbar h2 { letter-spacing: -.02em; }
-#projectSelect { width: 210px; min-height: 31px; }
+#projectSelect { width: 100%; min-height: 28px; }
 #page { padding: 24px 28px 48px; align-content: start; }
 
 .panel {

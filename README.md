@@ -33,6 +33,14 @@ Python 标准库 + SQLite + 原生 Web 前端实现，无第三方运行依赖�
 WMS_ADMIN_NAME=张三 WMS_ADMIN_USERNAME=zhangsan WMS_ADMIN_PASSWORD='初始密码' ./run.sh
 ```
 
+### 固定假数据预览
+
+```bash
+scripts/dev-preview.sh
+```
+
+使用固定账号 `preview / Preview123456`（项目管理员）和 `admin / PreviewAdmin123`（系统管理员），假数据持久化在 `.preview/`，重复启动秒级完成。详见 [local-preview.md](docs/local-preview.md)。
+
 ## 测试
 
 ```bash
