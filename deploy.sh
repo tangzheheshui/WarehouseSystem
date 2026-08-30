@@ -108,7 +108,7 @@ rsync -az --delete \
   --exclude '.git/' \
   --exclude '.pycache/' \
   --exclude '__pycache__/' \
-  --exclude 'data/' \
+  --exclude '/data/' \
   --exclude '.DS_Store' \
   ./ "$SSH_TARGET:/tmp/wms-$COMPANY_KEY/"
 
@@ -128,7 +128,7 @@ if [ "$DB_EXISTS" = yes ] && [ -f "$REMOTE_DIR/data/warehouse.db" ]; then
 fi
 
 rsync -a --delete \
-  --exclude data \
+  --exclude /data \
   --exclude .pycache \
   --exclude __pycache__ \
   "/tmp/wms-$COMPANY_KEY/" "$REMOTE_DIR/"
