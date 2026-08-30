@@ -210,7 +210,7 @@ REMOTE
 
 echo "==> Running remote tests"
 ssh "$SSH_TARGET" \
-  "cd '$REMOTE_DIR' && PYTHONPYCACHEPREFIX=/tmp/wms-pycache python3 -m unittest discover -s tests -v"
+  "cd '$REMOTE_DIR' && PYTHONPYCACHEPREFIX=/tmp/wms-pycache python3 -m unittest discover -s tests/cases -v"
 
 echo "==> Health check"
 ssh "$SSH_TARGET" \
