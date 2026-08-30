@@ -1212,7 +1212,10 @@ def get_order(connection, user, project_id, order_id):
 def list_inventory(connection, user, project_id, warehouse_name=None,
                    storage_area=None, cargo_area=None, location_name=None,
                    product_code=None, product_name=None, batch_no=None,
-                   quality_status=None, prohibit_outbound=None):
+                   quality_status=None, prohibit_outbound=None,
+                   production_start_date=None, production_end_date=None,
+                   expiry_start_date=None, expiry_end_date=None,
+                   inbound_start_date=None, inbound_end_date=None):
     require_project(connection, user, project_id)
     sql = """SELECT i.*, p.product_name, p.spec, p.unit,
                     l.storage_area, l.cargo_area, l.location_name,
@@ -1240,6 +1243,18 @@ def list_inventory(connection, user, project_id, warehouse_name=None,
     if prohibit_outbound in ("0", "1", 0, 1):
         sql += " AND i.prohibit_outbound = ?"
         params.append(int(prohibit_outbound))
+    date_filters = (
+        ("date(i.production_date)", production_start_date, production_end_date),
+        ("date(i.expiry_date)", expiry_start_date, expiry_end_date),
+        ("date(i.inbound_date)", inbound_start_date, inbound_end_date),
+    )
+    for column, start_date, end_date in date_filters:
+        if start_date:
+            sql += f" AND {column} >= date(?)"
+            params.append(start_date)
+        if end_date:
+            sql += f" AND {column} <= date(?)"
+            params.append(end_date)
     sql += " ORDER BY w.warehouse_name, l.storage_area, l.cargo_area, l.location_name, i.product_id LIMIT 1000"
     rows = []
     for row in connection.execute(sql, params):
@@ -1254,6 +1269,40 @@ def list_inventory(connection, user, project_id, warehouse_name=None,
         )
         rows.append(item)
     return rows
+
+
+def inventory_filter_options(connection, user, project_id):
+    require_project(connection, user, project_id)
+    records = []
+    for row in connection.execute(
+        """SELECT DISTINCT w.warehouse_name, l.storage_area,
+                          l.cargo_area, l.location_name,
+                          p.product_id, p.product_name, p.spec, p.unit,
+                          i.batch_no, i.quality_status,
+                          i.production_date, i.expiry_date, i.inbound_date
+           FROM inventory i
+           JOIN products p ON p.product_id = i.product_id
+           JOIN warehouse_locations l ON l.id = i.location_id
+           JOIN warehouses w ON w.id = l.warehouse_id
+          WHERE i.project_id = ?
+          ORDER BY w.warehouse_name, l.storage_area, l.cargo_area,
+                   l.location_name, p.product_id, i.batch_no""",
+        (project_id,),
+    ):
+        records.append(dict(row))
+
+    def date_bounds(column):
+        values = [record[column] for record in records if record[column]]
+        return {"min": min(values) if values else None, "max": max(values) if values else None}
+
+    return {
+        "records": records,
+        "dates": {
+            "production_date": date_bounds("production_date"),
+            "expiry_date": date_bounds("expiry_date"),
+            "inbound_date": date_bounds("inbound_date"),
+        },
+    }
 
 
 def inventory_workbook(project_name, rows):

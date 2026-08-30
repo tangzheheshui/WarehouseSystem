@@ -158,6 +158,25 @@ class Handler(BaseHTTPRequestHandler):
         values = self.query.get(name)
         return values[0] if values else None
 
+    def inventory_query(self):
+        return {
+            "warehouse_name": self.query_value("warehouseName"),
+            "storage_area": self.query_value("storageArea"),
+            "cargo_area": self.query_value("cargoArea"),
+            "location_name": self.query_value("locationName"),
+            "product_code": self.query_value("productCode"),
+            "product_name": self.query_value("productName"),
+            "batch_no": self.query_value("batchNo"),
+            "quality_status": self.query_value("qualityStatus"),
+            "prohibit_outbound": self.query_value("prohibitOutbound"),
+            "production_start_date": self.query_value("productionStartDate"),
+            "production_end_date": self.query_value("productionEndDate"),
+            "expiry_start_date": self.query_value("expiryStartDate"),
+            "expiry_end_date": self.query_value("expiryEndDate"),
+            "inbound_start_date": self.query_value("inboundStartDate"),
+            "inbound_end_date": self.query_value("inboundEndDate"),
+        }
+
     def handle_api(self, method):
         connection = db.connect(self.server.db_path)
         self.connection = connection
@@ -346,21 +365,22 @@ class Handler(BaseHTTPRequestHandler):
                 ))
             return
 
+        if method == "GET" and self.path == "/api/inventory/filters":
+            user = self.require_user(connection, role="project_admin")
+            if not user:
+                return
+            self.send_json(service.inventory_filter_options(
+                connection, user, self.project_id(user)
+            ))
+            return
+
         if method == "GET" and self.path == "/api/inventory":
             user = self.require_user(connection, role="project_admin")
             if not user:
                 return
             self.send_json(service.list_inventory(
                 connection, user, self.project_id(user),
-                warehouse_name=self.query_value("warehouseName"),
-                storage_area=self.query_value("storageArea"),
-                cargo_area=self.query_value("cargoArea"),
-                location_name=self.query_value("locationName"),
-                product_code=self.query_value("productCode"),
-                product_name=self.query_value("productName"),
-                batch_no=self.query_value("batchNo"),
-                quality_status=self.query_value("qualityStatus"),
-                prohibit_outbound=self.query_value("prohibitOutbound"),
+                **self.inventory_query(),
             ))
             return
 
@@ -374,15 +394,7 @@ class Handler(BaseHTTPRequestHandler):
             ).fetchone()
             rows = service.list_inventory(
                 connection, user, project_id,
-                warehouse_name=self.query_value("warehouseName"),
-                storage_area=self.query_value("storageArea"),
-                cargo_area=self.query_value("cargoArea"),
-                location_name=self.query_value("locationName"),
-                product_code=self.query_value("productCode"),
-                product_name=self.query_value("productName"),
-                batch_no=self.query_value("batchNo"),
-                quality_status=self.query_value("qualityStatus"),
-                prohibit_outbound=self.query_value("prohibitOutbound"),
+                **self.inventory_query(),
             )
             self.send_bytes(
                 service.inventory_workbook(project["project_name"], rows),

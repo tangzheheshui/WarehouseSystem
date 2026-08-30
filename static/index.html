@@ -22,21 +22,43 @@
 
 <div id="appView" class="app-shell hidden">
   <aside class="sidebar">
-    <div class="brand">仓库管理</div>
+    <div id="projectSelectWrap" class="brand-workspace">
+      <div class="brand">
+        <span class="brand-mark">W</span>
+        <span class="brand-copy">
+          <strong>仓库管理</strong>
+          <button id="projectSelect" class="project-switcher hidden" type="button"
+            aria-haspopup="listbox" aria-expanded="false" title="切换项目"
+            aria-label="切换项目">
+            <span id="projectSwitcherName">请选择项目</span>
+            <span class="switcher-arrow" aria-hidden="true">▾</span>
+          </button>
+        </span>
+      </div>
+      <div id="projectMenu" class="project-menu hidden">
+        <div class="project-menu-head">
+          <span>切换项目</span>
+          <span id="projectCount">0 个</span>
+        </div>
+        <div id="projectMenuList" class="project-menu-list" role="listbox" aria-label="项目列表"></div>
+      </div>
+    </div>
     <nav id="nav"></nav>
     <div class="sidebar-user">
-      <strong id="userName"></strong>
-      <span id="userRole"></span>
+      <span id="userAvatar" class="user-avatar"></span>
+      <span class="user-copy">
+        <strong id="userName"></strong>
+        <span id="userRole"></span>
+      </span>
+      <div class="sidebar-actions">
+        <button id="passwordButton" class="btn ghost small" type="button">修改密码</button>
+        <button id="logoutButton" class="btn ghost small" type="button">退出</button>
+      </div>
     </div>
-    <button id="logoutButton" class="btn ghost">退出</button>
   </aside>
   <main>
     <header class="topbar">
       <h2 id="pageTitle">工作台</h2>
-      <div class="top-actions">
-        <select id="projectSelect" class="hidden"></select>
-        <button class="btn" data-page="password">修改密码</button>
-      </div>
     </header>
     <section id="page"></section>
   </main>

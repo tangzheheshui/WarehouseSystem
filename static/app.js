@@ -18,6 +18,13 @@ const state = {
   editingProject: null,
   editingUser: null,
   historyProjectId: null,
+  inventoryOptions: null,
+  inventoryRows: [],
+  inventoryPage: 1,
+  inventoryPageSize: 20,
+  inventorySelectedIds: new Set(),
+  inventorySelectedOnly: false,
+  inventorySort: { key: null, direction: "asc" },
 };
 
 const titles = {
@@ -36,21 +43,21 @@ const titles = {
 };
 
 const adminPages = [
-  { id: "dashboard", label: "工作台" },
-  { id: "products", label: "商品信息" },
-  { id: "warehouses", label: "仓库信息" },
-  { id: "projects", label: "项目管理" },
-  { id: "users", label: "用户管理" },
+  { id: "dashboard", label: "工作台", group: "总览", tone: "blue" },
+  { id: "products", label: "商品信息", group: "主数据", tone: "violet" },
+  { id: "warehouses", label: "仓库信息", group: "主数据", tone: "violet" },
+  { id: "projects", label: "项目管理", group: "配置权限", tone: "teal" },
+  { id: "users", label: "用户管理", group: "配置权限", tone: "teal" },
 ];
 
 const projectPages = [
-  { id: "dashboard", label: "工作台" },
-  { id: "inbound", label: "入库管理" },
-  { id: "outbound", label: "出库管理" },
-  { id: "inventory", label: "库存查询" },
-  { id: "picking", label: "拣货单" },
-  { id: "templates", label: "模板管理" },
-  { id: "logs", label: "操作日志" },
+  { id: "dashboard", label: "工作台", group: "总览", tone: "blue" },
+  { id: "inbound", label: "入库管理", group: "仓库作业", tone: "green" },
+  { id: "outbound", label: "出库管理", group: "仓库作业", tone: "amber" },
+  { id: "inventory", label: "库存查询", group: "库存中心", tone: "blue" },
+  { id: "picking", label: "拣货单", group: "库存中心", tone: "teal" },
+  { id: "templates", label: "模板管理", group: "配置审计", tone: "violet" },
+  { id: "logs", label: "操作日志", group: "配置审计", tone: "slate" },
 ];
 
 function esc(value) {
@@ -156,38 +163,75 @@ function allowedPages() {
 
 function renderNav() {
   const nav = document.getElementById("nav");
-  nav.innerHTML = allowedPages().map(item => `
-    <button data-page="${item.id}" class="${state.page === item.id ? "active" : ""}">
-      ${item.label}
-    </button>
+  const pages = allowedPages();
+  const groups = [...new Set(pages.map(item => item.group))];
+  nav.innerHTML = groups.map(group => `
+    <div class="nav-group">
+      <div class="nav-title">${esc(group)}</div>
+      ${pages.filter(item => item.group === group).map(item => `
+        <button data-page="${item.id}" data-tone="${item.tone || "blue"}"
+          class="${state.page === item.id ? "active" : ""}">
+          <span class="nav-dot"></span><span>${esc(item.label)}</span>
+        </button>`).join("")}
+    </div>
   `).join("");
   nav.querySelectorAll("button").forEach(button => {
     button.onclick = () => location.hash = `#${button.dataset.page}`;
   });
   document.getElementById("userName").textContent = state.user.displayName;
   document.getElementById("userRole").textContent = state.user.role === "admin"
-    ? "管理员" : "项目管理员";
+    ? "系统管理员" : "项目管理员";
+  document.getElementById("userAvatar").textContent = String(
+    state.user.displayName || "?"
+  ).slice(0, 1).toUpperCase();
 }
 
 function renderProjectSelect() {
-  const select = document.getElementById("projectSelect");
+  const button = document.getElementById("projectSelect");
+  const menu = document.getElementById("projectMenu");
+  const nameNode = document.getElementById("projectSwitcherName");
+  const wrapper = document.getElementById("projectSelectWrap");
   if (state.user.role !== "project_admin") {
-    select.classList.add("hidden");
-    select.innerHTML = "";
+    button.classList.add("hidden");
+    menu.classList.add("hidden");
     return;
   }
-  select.classList.remove("hidden");
-  select.innerHTML = state.projects.map(project => `
-    <option value="${project.id}" ${String(project.id) === String(state.projectId) ? "selected" : ""}>
-      ${esc(project.project_name)}
-    </option>
-  `).join("");
-  select.onchange = () => {
-    state.projectId = select.value;
-    localStorage.setItem(PROJECT_KEY, state.projectId);
-    state.templates = [];
-    renderPage();
+  button.classList.remove("hidden");
+
+  const current = state.projects.find(project =>
+    String(project.id) === String(state.projectId)
+  );
+  nameNode.textContent = current?.project_name || "请选择项目";
+  button.classList.toggle("empty", !state.projects.length);
+  button.setAttribute("aria-expanded", "false");
+  menu.classList.add("hidden");
+  document.getElementById("projectCount").textContent = `${state.projects.length} 个`;
+  const list = document.getElementById("projectMenuList");
+  list.innerHTML = state.projects.map(project => {
+    const active = String(project.id) === String(state.projectId);
+    return `<button type="button" class="project-option ${active ? "active" : ""}"
+      role="option" aria-selected="${active}" data-project-id="${project.id}">
+      <span class="project-option-name">${esc(project.project_name)}</span>
+      <span class="project-option-check">✓</span>
+    </button>`;
+  }).join("");
+
+  button.onclick = event => {
+    event.stopPropagation();
+    const willOpen = menu.classList.contains("hidden");
+    menu.classList.toggle("hidden", !willOpen);
+    button.setAttribute("aria-expanded", String(willOpen));
   };
+  list.querySelectorAll("[data-project-id]").forEach(option => {
+    option.onclick = event => {
+      event.stopPropagation();
+      state.projectId = option.dataset.projectId;
+      localStorage.setItem(PROJECT_KEY, state.projectId);
+      state.templates = [];
+      menu.classList.add("hidden");
+      renderPage();
+    };
+  });
 }
 
 function showApp() {
@@ -211,8 +255,8 @@ function setStatus(value) {
   return `<span class="badge ${esc(value)}">${labels[value] || esc(value)}</span>`;
 }
 
-function metric(label, value) {
-  return `<div class="metric"><span>${label}</span><strong>${esc(value)}</strong></div>`;
+function metric(label, value, tone = "blue") {
+  return `<div class="metric tone-${tone}"><span>${label}</span><strong>${esc(value)}</strong></div>`;
 }
 
 async function renderDashboard() {
@@ -224,10 +268,10 @@ async function renderDashboard() {
     state.projects = projects;
     document.getElementById("page").innerHTML = `
       <div class="metrics">
-        ${metric("项目管理员", data.users)}
-        ${metric("有效项目", data.projects)}
-        ${metric("有效商品", data.products)}
-        ${metric("有效仓库", data.warehouses)}
+        ${metric("项目管理员", data.users, "violet")}
+        ${metric("有效项目", data.projects, "teal")}
+        ${metric("有效商品", data.products, "blue")}
+        ${metric("有效仓库", data.warehouses, "amber")}
       </div>
       <div class="panel">
         <div class="panel-header"><h3>项目列表</h3>
@@ -252,10 +296,10 @@ async function renderDashboard() {
     const data = await api("dashboard");
     document.getElementById("page").innerHTML = `
       <div class="metrics">
-        ${metric("库存批次", data.lots)}
-        ${metric("库存总数", data.quantity)}
-        ${metric("今日单据", data.todayOrders)}
-        ${metric("待拣货", data.pendingPicking)}
+        ${metric("库存批次", data.lots, "blue")}
+        ${metric("库存总数", data.quantity, "teal")}
+        ${metric("今日单据", data.todayOrders, "violet")}
+        ${metric("待拣货", data.pendingPicking, "amber")}
       </div>
       <div class="panel"><h3>最近单据</h3><div id="recentOrders"></div></div>`;
     const orders = await api("orders");
@@ -391,37 +435,75 @@ async function loadImportOrders(type, form) {
 }
 
 async function renderInventory() {
+  document.getElementById("page").innerHTML = `<div class="panel">正在准备查询条件...</div>`;
+  state.inventoryOptions = await api("inventory/filters");
   document.getElementById("page").innerHTML = `
-    <div class="panel">
-      <h3>查询库存</h3>
-      <form id="inventoryForm" class="fields-row wide">
-        <label>仓库<input name="warehouseName"></label>
-        <label>库区<input name="storageArea"></label>
-        <label>货区<input name="cargoArea"></label>
-        <label>货位<input name="locationName"></label>
-        <label>货品编号<input name="productCode"></label>
-        <label>货品名称<input name="productName"></label>
-        <label>生产批号<input name="batchNo"></label>
-        <label>品质标记<select name="qualityStatus">
-          <option value=""></option><option value="良品">良品</option><option value="扣留">扣留</option>
-        </select></label>
-        <label>禁止出库<select name="prohibitOutbound">
-          <option value=""></option><option value="1">是</option><option value="0">否</option>
-        </select></label>
-        <button class="btn primary" type="submit">查询</button>
+    <div class="panel filter-panel">
+      <form id="inventoryForm" class="compact-filter">
+        <div class="filter-grid primary-filter-grid">
+          <label>仓库<select name="warehouseName" data-option></select></label>
+          <label>库区<select name="storageArea" data-option></select></label>
+          <label>货区<select name="cargoArea" data-option></select></label>
+          <label>货位<select name="locationName" data-option></select></label>
+          <label>货品<select name="productCode" data-option></select></label>
+          <label>生产批号<select name="batchNo" data-option></select></label>
+        </div>
+        <div class="filter-actions">
+          <details id="advancedFilter" class="filter-popover">
+            <summary>更多筛选</summary>
+            <div class="filter-popover-panel">
+              <label>品质标记<select name="qualityStatus" data-option></select></label>
+              <label>禁止出库<select name="prohibitOutbound">
+                <option value="">全部</option><option value="1">仅禁止</option><option value="0">仅允许</option>
+              </select></label>
+              <label>生产起<input type="date" name="productionStartDate"></label>
+              <label>生产止<input type="date" name="productionEndDate"></label>
+              <label>到期起<input type="date" name="expiryStartDate"></label>
+              <label>到期止<input type="date" name="expiryEndDate"></label>
+              <label>入库起<input type="date" name="inboundStartDate"></label>
+              <label>入库止<input type="date" name="inboundEndDate"></label>
+            </div>
+          </details>
+          <button class="btn primary" type="submit">查询</button>
+          <button class="btn" type="button" id="resetInventory">重置</button>
+        </div>
       </form>
     </div>
-    <div class="panel"><h3>商品汇总</h3><div id="inventorySummary"></div></div>
-    <div class="panel">
-      <div class="panel-header"><h3>批次明细</h3>
-        <button class="btn" id="exportInventory">导出Excel</button></div>
+    <div class="panel result-panel">
+      <div class="panel-header">
+        <div>
+          <h3>批次明细</h3>
+          <div id="inventoryStats" class="table-stats"></div>
+        </div>
+        <div class="actions">
+          <button class="btn small hidden" id="inventorySelectedOnly">仅看选中</button>
+          <button class="btn small hidden" id="clearInventorySelection">清空勾选</button>
+          <button class="btn" id="exportInventory">导出Excel</button>
+        </div>
+      </div>
       <div id="inventoryTable"></div>
     </div>`;
+
   const form = document.getElementById("inventoryForm");
+  populateInventoryOptions(form);
+  form.querySelectorAll("[data-option]").forEach(select => {
+    select.onchange = () => populateInventoryOptions(form);
+  });
   form.onsubmit = event => {
     event.preventDefault();
+    document.getElementById("advancedFilter")?.removeAttribute("open");
     loadInventory(new FormData(form));
   };
+  document.getElementById("resetInventory").onclick = () => {
+    form.reset();
+    populateInventoryOptions(form);
+    document.getElementById("advancedFilter")?.removeAttribute("open");
+    loadInventory(new FormData(form));
+  };
+  document.addEventListener("click", event => {
+    const popover = document.getElementById("advancedFilter");
+    if (popover?.open && !popover.contains(event.target)) popover.removeAttribute("open");
+  });
   document.getElementById("exportInventory").onclick = () => {
     const query = new URLSearchParams(new FormData(form)).toString();
     download(`inventory/export?${query}`, "库存查询结果.xlsx");
@@ -429,43 +511,304 @@ async function renderInventory() {
   await loadInventory(new FormData(form));
 }
 
-async function loadInventory(form) {
-  const query = new URLSearchParams(form).toString();
-  const rows = await api(`inventory?${query}`);
-  const summary = Object.values(rows.reduce((result, row) => {
-    if (!result[row.product_id]) {
-      result[row.product_id] = {
-        product_id: row.product_id, product_name: row.product_name,
-        spec: row.spec, unit: row.unit, quantity: 0, available: 0,
-        locations: new Set(),
-      };
+function inventoryOptionRecords(form, currentField = "") {
+  const values = Object.fromEntries(new FormData(form));
+  const keys = {
+    warehouseName: "warehouse_name",
+    storageArea: "storage_area",
+    cargoArea: "cargo_area",
+    locationName: "location_name",
+    productCode: "product_id",
+    batchNo: "batch_no",
+    qualityStatus: "quality_status",
+  };
+  const records = state.inventoryOptions?.records || [];
+  return records.filter(record => Object.entries(keys).every(([field, key]) => {
+    return field === currentField || !values[field] || String(record[key]) === values[field];
+  }));
+}
+
+function setSelectOptions(select, options, placeholder) {
+  const selected = select.value;
+  select.innerHTML = `<option value="">${esc(placeholder)}</option>` + options.map(option =>
+    `<option value="${esc(option.value)}" ${option.value === selected ? "selected" : ""}>${esc(option.label)}</option>`
+  ).join("");
+}
+
+function populateInventoryOptions(form) {
+  const definitions = [
+    { name: "warehouseName", key: "warehouse_name", placeholder: "全部仓库" },
+    { name: "storageArea", key: "storage_area", placeholder: "全部库区" },
+    { name: "cargoArea", key: "cargo_area", placeholder: "全部货区" },
+    { name: "locationName", key: "location_name", placeholder: "全部货位" },
+    { name: "batchNo", key: "batch_no", placeholder: "全部批次" },
+    { name: "qualityStatus", key: "quality_status", placeholder: "全部品质" },
+  ];
+  definitions.forEach(item => {
+    const select = form.elements[item.name];
+    const values = [...new Set(inventoryOptionRecords(form, item.name).map(row => row[item.key]))]
+      .filter(value => value !== null && value !== undefined && value !== "")
+      .sort((a, b) => String(a).localeCompare(String(b), "zh-CN"));
+    setSelectOptions(select, values.map(value => ({ value, label: value })), item.placeholder);
+  });
+
+  const productSelect = form.elements.productCode;
+  const products = new Map();
+  inventoryOptionRecords(form, "productCode").forEach(row => {
+    if (!products.has(row.product_id)) {
+      products.set(row.product_id, `${row.product_id} · ${row.product_name}${row.spec ? ` / ${row.spec}` : ""}`);
     }
-    result[row.product_id].quantity += row.total_quantity;
-    result[row.product_id].available += row.available_quantity;
-    if (row.total_quantity > 0) result[row.product_id].locations.add(row.full_location);
-    return result;
-  }, {}));
-  document.getElementById("inventorySummary").innerHTML = simpleTable(
-    ["货品编号", "货品名称", "规格", "标准单位", "库存总数", "可用库存", "货位"],
-    summary.map(row => [
-      `<span class="mono">${esc(row.product_id)}</span>`, esc(row.product_name),
-      esc(row.spec || "-"), esc(row.unit || "-"), row.quantity, row.available,
-      Array.from(row.locations).map(esc).join("、") || "-",
-    ]),
+  });
+  setSelectOptions(
+    productSelect,
+    [...products.entries()].map(([value, label]) => ({ value, label })),
+    "全部货品",
   );
-  document.getElementById("inventoryTable").innerHTML = simpleTable(
-    ["仓库", "库区", "货区", "货位", "货品编号", "货品名称", "生产批号",
-     "生产日期", "到期日期", "库存总数", "分拣占用", "移动占用", "可用库存",
-     "品质标记", "禁止出库"],
-    rows.map(row => [
-      esc(row.warehouse_name), esc(row.storage_area), esc(row.cargo_area),
-      esc(row.location_name), `<span class="mono">${esc(row.product_id)}</span>`,
-      esc(row.product_name), esc(row.batch_no), esc(row.production_date || "-"),
-      esc(row.expiry_date || "-"), row.total_quantity, row.picking_reserved,
-      row.moving_reserved, row.available_quantity, esc(row.quality_status),
-      row.prohibit_outbound ? "是" : "否",
-    ]),
+}
+
+async function loadInventory(form) {
+  const tableNode = document.getElementById("inventoryTable");
+  if (tableNode) tableNode.innerHTML = `<div class="empty">正在查询库存...</div>`;
+  const query = new URLSearchParams(form).toString();
+  state.inventoryRows = await api(`inventory?${query}`);
+  state.inventoryPage = 1;
+  state.inventorySelectedIds.clear();
+  state.inventorySelectedOnly = false;
+  state.inventorySort = { key: null, direction: "asc" };
+  renderInventoryTable();
+}
+
+function inventoryExpiry(value) {
+  if (!value) return { label: "-", className: "" };
+  const expiry = new Date(`${String(value).slice(0, 10)}T00:00:00`);
+  const days = Math.floor((expiry - new Date()) / 86400000);
+  if (days < 0) return { label: `${value} · 已过期`, className: "danger" };
+  if (days <= 30) return { label: `${value} · ${days}天`, className: "warning" };
+  return { label: `${value} · ${days}天`, className: "success" };
+}
+
+const inventoryColumns = [
+  { key: "warehouse_name", label: "仓库" },
+  { key: "storage_area", label: "库区" },
+  { key: "cargo_area", label: "货区" },
+  { key: "location_name", label: "货位" },
+  { key: "product_id", label: "货品编号" },
+  { key: "product_name", label: "货品名称" },
+  { key: "batch_no", label: "生产批号" },
+  { key: "production_date", label: "生产日期", type: "date" },
+  { key: "expiry_date", label: "到期日期", type: "date" },
+  { key: "total_quantity", label: "库存总数", type: "number" },
+  { key: "picking_reserved", label: "分拣占用", type: "number" },
+  { key: "moving_reserved", label: "移动占用", type: "number" },
+  { key: "available_quantity", label: "可用库存", type: "number" },
+  { key: "quality_status", label: "品质标记" },
+  { key: "prohibit_outbound", label: "禁止出库" },
+  { key: "inbound_date", label: "入库日", type: "date" },
+];
+
+function inventoryCellValue(row, key) {
+  if (key === "prohibit_outbound") return row.prohibit_outbound ? "是" : "否";
+  return row[key];
+}
+
+function inventorySortValue(row, key) {
+  const value = inventoryCellValue(row, key);
+  if (value === null || value === undefined || value === "") return "";
+  return value;
+}
+
+function sortedInventoryRows() {
+  const { key, direction } = state.inventorySort;
+  if (!key) return [...state.inventoryRows];
+  const column = inventoryColumns.find(item => item.key === key);
+  const factor = direction === "desc" ? -1 : 1;
+  return [...state.inventoryRows].sort((a, b) => {
+    const left = inventorySortValue(a, key);
+    const right = inventorySortValue(b, key);
+    let result;
+    if (column?.type === "number") {
+      result = (Number(left) || 0) - (Number(right) || 0);
+    } else {
+      result = String(left).localeCompare(String(right), "zh-CN", { numeric: true });
+    }
+    if (result === 0) result = Number(a.id) - Number(b.id);
+    return result * factor;
+  });
+}
+
+function inventoryTableCell(row, column) {
+  const value = inventoryCellValue(row, column.key);
+  if (column.type === "number") {
+    return `<td class="numeric ${column.key === "available_quantity" ? "available" : ""}">${value}</td>`;
+  }
+  if (column.type === "date") {
+    const expiry = column.key === "expiry_date" ? inventoryExpiry(row.expiry_date) : null;
+    return `<td class="nowrap ${expiry ? expiry.className : ""}">${esc(value || "-")}${expiry ? `<small>${esc(expiry.label.split(" · ").slice(1).join(""))}</small>` : ""}</td>`;
+  }
+  if (column.key === "product_id") {
+    return `<td class="mono product-code">${esc(value)}</td>`;
+  }
+  if (column.key === "quality_status") {
+    return `<td><span class="badge ${value === "良品" ? "completed" : "warning"}">${esc(value)}</span></td>`;
+  }
+  if (column.key === "prohibit_outbound") {
+    return `<td><span class="badge ${row.prohibit_outbound ? "disabled" : "active"}">${value ? "是" : "否"}</span></td>`;
+  }
+  return `<td>${esc(value || "-")}</td>`;
+}
+
+function renderInventoryTable() {
+  const selectedOnlyButton = document.getElementById("inventorySelectedOnly");
+  const clearButton = document.getElementById("clearInventorySelection");
+  if (!state.inventorySelectedIds.size) state.inventorySelectedOnly = false;
+
+  const sourceRows = state.inventorySelectedOnly
+    ? state.inventoryRows.filter(row => state.inventorySelectedIds.has(String(row.id)))
+    : state.inventoryRows;
+  const rows = sortedInventoryRows().filter(row => sourceRows.some(item => item.id === row.id));
+  const pageSize = state.inventoryPageSize;
+  const totalPages = Math.max(1, Math.ceil(rows.length / pageSize));
+  state.inventoryPage = Math.min(Math.max(1, state.inventoryPage), totalPages);
+  const currentPage = state.inventoryPage;
+  const pageStart = (currentPage - 1) * pageSize;
+  const pageRows = rows.slice(pageStart, pageStart + pageSize);
+  const totalQuantity = rows.reduce((sum, row) => sum + row.total_quantity, 0);
+  const available = rows.reduce((sum, row) => sum + row.available_quantity, 0);
+  const reserved = rows.reduce((sum, row) => sum + row.picking_reserved + row.moving_reserved, 0);
+
+  const stats = document.getElementById("inventoryStats");
+  if (stats) stats.innerHTML = `
+    <span class="chip">批次 ${rows.length}</span>
+    <span class="chip tone-blue">库存 ${totalQuantity}</span>
+    <span class="chip tone-green">可用 ${available}</span>
+    <span class="chip tone-amber">占用 ${reserved}</span>
+    ${state.inventorySelectedIds.size ? `<span class="chip tone-violet">已选 ${state.inventorySelectedIds.size}</span>` : ""}`;
+
+  if (selectedOnlyButton) {
+    selectedOnlyButton.classList.toggle("hidden", !state.inventorySelectedIds.size);
+    selectedOnlyButton.textContent = state.inventorySelectedOnly ? "显示全部" : "仅看选中";
+  }
+  if (clearButton) clearButton.classList.toggle("hidden", !state.inventorySelectedIds.size);
+
+  const allPageSelected = pageRows.length > 0 && pageRows.every(row =>
+    state.inventorySelectedIds.has(String(row.id))
   );
+  const table = !rows.length ? `<div class="empty">${state.inventorySelectedOnly ? "没有勾选库存" : "没有符合条件的库存批次"}</div>` : `
+    <div class="inventory-table-wrap">
+      <table class="data-table inventory-table">
+        <thead><tr>
+          <th class="index-cell">#</th>
+          <th class="check-cell">
+            <input type="checkbox" id="selectInventoryPage" class="table-check" ${allPageSelected ? "checked" : ""} aria-label="选择本页">
+          </th>
+          ${inventoryColumns.map(column => {
+            const active = state.inventorySort.key === column.key;
+            const mark = active ? (state.inventorySort.direction === "asc" ? "▲" : "▼") : "↕";
+            return `<th class="sortable ${active ? "sort-active" : ""}" data-sort-key="${column.key}"
+              title="按${column.label}排序">${column.label}<span class="sort-mark">${mark}</span></th>`;
+          }).join("")}
+        </tr></thead>
+        <tbody>${pageRows.map((row, index) => {
+          const expiry = inventoryExpiry(row.expiry_date);
+          const selected = state.inventorySelectedIds.has(String(row.id));
+          return `<tr class="${selected ? "selected" : ""} ${row.available_quantity <= 0 ? "row-muted" : ""}">
+            <td class="index-cell">${pageStart + index + 1}</td>
+            <td class="check-cell"><input type="checkbox" class="table-check" data-inventory-id="${row.id}"
+              ${selected ? "checked" : ""} aria-label="选择批次 ${esc(row.batch_no)}"></td>
+            ${inventoryColumns.map(column => inventoryTableCell(row, column)).join("")}
+          </tr>`;
+        }).join("")}</tbody>
+      </table>
+    </div>`;
+
+  const start = rows.length ? pageStart + 1 : 0;
+  const end = Math.min(rows.length, pageStart + pageSize);
+  const pageButtons = [];
+  for (let page = 1; page <= totalPages; page += 1) {
+    if (page === 1 || page === totalPages || Math.abs(page - currentPage) <= 1) {
+      pageButtons.push(page);
+    } else if (pageButtons[pageButtons.length - 1] !== "…") {
+      pageButtons.push("…");
+    }
+  }
+  document.getElementById("inventoryTable").innerHTML = `${table}
+    <div class="pagination">
+      <span>第 ${start}-${end} 条 / 共 ${rows.length} 条</span>
+      <div class="pagination-tools">
+        <select id="inventoryPageSize" aria-label="每页条数">
+          ${[10, 20, 50, 100].map(size => `<option value="${size}" ${size === pageSize ? "selected" : ""}>${size} 条/页</option>`).join("")}
+        </select>
+        <button class="btn small" data-page-action="first" ${currentPage === 1 ? "disabled" : ""}>首页</button>
+        <button class="btn small" id="inventoryPrev" ${currentPage === 1 ? "disabled" : ""}>上一页</button>
+        ${pageButtons.map(page => page === "…" ? '<span class="page-ellipsis">…</span>' : `<button class="btn small page-number ${page === currentPage ? "primary" : ""}" data-page-number="${page}">${page}</button>`).join("")}
+        <button class="btn small" id="inventoryNext" ${currentPage === totalPages ? "disabled" : ""}>下一页</button>
+        <button class="btn small" data-page-action="last" ${currentPage === totalPages ? "disabled" : ""}>末页</button>
+      </div>
+    </div>`;
+
+  const pageSizeSelect = document.getElementById("inventoryPageSize");
+  if (pageSizeSelect) pageSizeSelect.onchange = () => {
+    state.inventoryPageSize = Number(pageSizeSelect.value);
+    state.inventoryPage = 1;
+    renderInventoryTable();
+  };
+  const prev = document.getElementById("inventoryPrev");
+  const next = document.getElementById("inventoryNext");
+  if (prev) prev.onclick = () => { state.inventoryPage -= 1; renderInventoryTable(); };
+  if (next) next.onclick = () => { state.inventoryPage += 1; renderInventoryTable(); };
+  document.querySelectorAll("[data-page-action]").forEach(button => {
+    button.onclick = () => {
+      if (!button.disabled) {
+        state.inventoryPage = button.dataset.pageAction === "first" ? 1 : totalPages;
+        renderInventoryTable();
+      }
+    };
+  });
+  document.querySelectorAll("[data-page-number]").forEach(button => {
+    button.onclick = () => {
+      state.inventoryPage = Number(button.dataset.pageNumber);
+      renderInventoryTable();
+    };
+  });
+  document.querySelectorAll(".inventory-table th[data-sort-key]").forEach(header => {
+    header.onclick = () => {
+      const key = header.dataset.sortKey;
+      if (state.inventorySort.key === key) {
+        state.inventorySort.direction = state.inventorySort.direction === "asc" ? "desc" : "asc";
+      } else {
+        state.inventorySort = { key, direction: "asc" };
+      }
+      state.inventoryPage = 1;
+      renderInventoryTable();
+    };
+  });
+  document.querySelectorAll("[data-inventory-id]").forEach(checkbox => {
+    checkbox.onchange = () => {
+      const id = checkbox.dataset.inventoryId;
+      if (checkbox.checked) state.inventorySelectedIds.add(id);
+      else state.inventorySelectedIds.delete(id);
+      renderInventoryTable();
+    };
+  });
+  const selectPage = document.getElementById("selectInventoryPage");
+  if (selectPage) selectPage.onchange = () => {
+    pageRows.forEach(row => {
+      const id = String(row.id);
+      if (selectPage.checked) state.inventorySelectedIds.add(id);
+      else state.inventorySelectedIds.delete(id);
+    });
+    renderInventoryTable();
+  };
+  if (selectedOnlyButton) selectedOnlyButton.onclick = () => {
+    state.inventorySelectedOnly = !state.inventorySelectedOnly;
+    state.inventoryPage = 1;
+    renderInventoryTable();
+  };
+  if (clearButton) clearButton.onclick = () => {
+    state.inventorySelectedIds.clear();
+    state.inventorySelectedOnly = false;
+    renderInventoryTable();
+  };
 }
 
 async function renderPicking() {
@@ -1118,8 +1461,18 @@ document.getElementById("logoutButton").onclick = async () => {
   document.getElementById("loginView").classList.remove("hidden");
 };
 
-document.querySelector(".topbar button[data-page]").onclick = () =>
+document.getElementById("passwordButton").onclick = () =>
   location.hash = "#password";
+
+document.addEventListener("click", event => {
+  const wrapper = document.getElementById("projectSelectWrap");
+  const menu = document.getElementById("projectMenu");
+  const button = document.getElementById("projectSelect");
+  if (!menu?.classList.contains("hidden") && !wrapper.contains(event.target)) {
+    menu.classList.add("hidden");
+    button.setAttribute("aria-expanded", "false");
+  }
+});
 
 window.addEventListener("hashchange", () => {
   const page = location.hash.slice(1) || "dashboard";
