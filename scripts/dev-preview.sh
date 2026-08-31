@@ -53,15 +53,50 @@ if [ ! -f "$MARKER" ]; then
     -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
     --data '{"oldPassword":"Admin123456","newPassword":"PreviewAdmin123"}' >/dev/null
 
+  WAREHOUSE_ID=$(curl -sS -X POST "http://127.0.0.1:$SEED_PORT/api/warehouses" \
+    -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+    --data '{"warehouseName":"主仓库","address":"上海市青浦区物流园","contactName":"刘仓管","contactPhone":"13800000000"}' \
+    | jsonget id)
+
+  for location in "A库区|A货区|A-01" "A库区|A货区|A-02" "A库区|B货区|B-01" "B库区|A货区|A-01"; do
+    AREA=$(echo "$location" | cut -d'|' -f1)
+    CARGO=$(echo "$location" | cut -d'|' -f2)
+    NAME=$(echo "$location" | cut -d'|' -f3)
+    curl -sS -X POST "http://127.0.0.1:$SEED_PORT/api/warehouse-locations" \
+      -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+      --data "{\"warehouseId\":$WAREHOUSE_ID,\"storageArea\":\"$AREA\",\"cargoArea\":\"$CARGO\",\"locationName\":\"$NAME\"}" >/dev/null
+  done
+
   for project_name in 上海冷链仓储项目 深圳电子仓项目 广州日用品仓项目 佛山家居仓项目; do
     curl -sS -X POST "http://127.0.0.1:$SEED_PORT/api/projects" \
       -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
-      --data "{\"projectName\":\"$project_name\",\"remark\":\"本地预览数据\"}" >/dev/null
+      --data "{\"projectName\":\"$project_name\",\"warehouseId\":$WAREHOUSE_ID,\"storageArea\":\"A库区\",\"remark\":\"本地预览数据\"}" >/dev/null
+  done
+
+  for product in "P001|东海带鱼|冷链食品|箱|365" "P002|冷冻虾仁|冷链食品|箱|180" "P003|智能手表|电子产品|个|730" "P004|洗衣液|日用品|瓶|1095" "P005|实木餐桌|家居|件|3650"; do
+    CODE=$(echo "$product" | cut -d'|' -f1)
+    NAME=$(echo "$product" | cut -d'|' -f2)
+    CATEGORY=$(echo "$product" | cut -d'|' -f3)
+    UNIT=$(echo "$product" | cut -d'|' -f4)
+    SHELF=$(echo "$product" | cut -d'|' -f5)
+    curl -sS -X POST "http://127.0.0.1:$SEED_PORT/api/products" \
+      -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+      --data "{\"productCode\":\"$CODE\",\"productName\":\"$NAME\",\"category\":\"$CATEGORY\",\"unit\":\"$UNIT\",\"shelfLifeDays\":$SHELF}" >/dev/null
   done
 
   PROJECT_IDS=$(curl -sS "http://127.0.0.1:$SEED_PORT/api/projects" \
     -H "Authorization: Bearer $TOKEN" \
     | python3 -c 'import json,sys; print(json.dumps([p["id"] for p in json.load(sys.stdin)]))')
+
+  PRODUCT_IDS=$(curl -sS "http://127.0.0.1:$SEED_PORT/api/products?status=active" \
+    -H "Authorization: Bearer $TOKEN" \
+    | python3 -c 'import json,sys; print(json.dumps([p["product_id"] for p in json.load(sys.stdin)]))')
+
+  for PROJECT_ID in $(printf '%s' "$PROJECT_IDS" | python3 -c 'import json,sys; print(" ".join(map(str, json.load(sys.stdin))))'); do
+    curl -sS -X PUT "http://127.0.0.1:$SEED_PORT/api/projects/$PROJECT_ID/products" \
+      -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+      --data "{\"productIds\":$PRODUCT_IDS}" >/dev/null
+  done
 
   curl -sS -X POST "http://127.0.0.1:$SEED_PORT/api/users" \
     -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \

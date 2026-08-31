@@ -159,7 +159,7 @@ class Handler(BaseHTTPRequestHandler):
         return values[0] if values else None
 
     def inventory_query(self):
-        return {
+        query = {
             "warehouse_name": self.query_value("warehouseName"),
             "storage_area": self.query_value("storageArea"),
             "cargo_area": self.query_value("cargoArea"),
@@ -176,6 +176,8 @@ class Handler(BaseHTTPRequestHandler):
             "inbound_start_date": self.query_value("inboundStartDate"),
             "inbound_end_date": self.query_value("inboundEndDate"),
         }
+        query["summary"] = self.query_value("summary")
+        return query
 
     def handle_api(self, method):
         connection = db.connect(self.server.db_path)
@@ -342,6 +344,22 @@ class Handler(BaseHTTPRequestHandler):
             )
             return
 
+        match = re.fullmatch(r"/api/(inbound|outbound)/manual", self.path)
+        if match and method == "POST":
+            user = self.require_user(connection, role="project_admin")
+            if not user:
+                return
+            body = self.read_json()
+            creator = (
+                service.create_manual_inbound
+                if match.group(1) == "inbound"
+                else service.create_manual_outbound
+            )
+            self.send_json(
+                creator(connection, user, self.project_id(user), body)
+            )
+            return
+
         if method == "GET" and self.path == "/api/orders":
             user = self.require_user(connection, role="project_admin")
             if not user:
@@ -397,7 +415,10 @@ class Handler(BaseHTTPRequestHandler):
                 **self.inventory_query(),
             )
             self.send_bytes(
-                service.inventory_workbook(project["project_name"], rows),
+                service.inventory_workbook(
+                    project["project_name"], rows,
+                    summary=self.query_value("summary") in ("1", "true"),
+                ),
                 "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 "inventory.xlsx",
             )
@@ -451,7 +472,9 @@ class Handler(BaseHTTPRequestHandler):
                 connection, user, self.project_id(user), int(match.group(1))
             )
             self.send_bytes(
-                service.picking_workbook(detail),
+                service.picking_workbook(
+                    detail, self.query_value("sort") or "location"
+                ),
                 "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 f"picking-{detail['order']['pick_no']}.xlsx",
             )
@@ -474,6 +497,8 @@ class Handler(BaseHTTPRequestHandler):
             self.send_json(service.create_product(
                 connection, user, body.get("productCode"),
                 body.get("productName"), body.get("spec"), body.get("unit"),
+                body.get("category"), body.get("unitWeight"),
+                body.get("volume"), body.get("shelfLifeDays"),
             ))
             return
 
@@ -486,6 +511,8 @@ class Handler(BaseHTTPRequestHandler):
             self.send_json(service.update_product(
                 connection, user, unquote(match.group(1)),
                 body.get("productName"), body.get("spec"), body.get("unit"),
+                body.get("category"), body.get("unitWeight"),
+                body.get("volume"), body.get("shelfLifeDays"),
                 body.get("status"),
             ))
             return
@@ -557,7 +584,9 @@ class Handler(BaseHTTPRequestHandler):
                 return
             body = self.read_json()
             self.send_json(service.create_project(
-                connection, user, body.get("projectName"), body.get("remark")
+                connection, user, body.get("projectName"),
+                body.get("warehouseId"), body.get("storageArea"),
+                body.get("remark"),
             ))
             return
 
@@ -569,8 +598,21 @@ class Handler(BaseHTTPRequestHandler):
             body = self.read_json()
             self.send_json(service.update_project(
                 connection, user, int(match.group(1)),
-                body.get("projectName"), body.get("remark"),
+                body.get("projectName"), body.get("warehouseId"),
+                body.get("storageArea"), body.get("remark"),
                 body.get("status"),
+            ))
+            return
+
+        match = re.fullmatch(r"/api/projects/(\d+)/products", self.path)
+        if match and method == "PUT":
+            user = self.require_admin(connection)
+            if not user:
+                return
+            body = self.read_json()
+            self.send_json(service.set_project_products(
+                connection, user, int(match.group(1)),
+                body.get("productIds"),
             ))
             return
 

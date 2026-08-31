@@ -20,6 +20,7 @@ PROJECT_USER_PASSWORD = "Project123456"
 
 class WarehouseFlowTests(unittest.TestCase):
     def setUp(self):
+        self.serial = 0
         self.directory = tempfile.TemporaryDirectory()
         self.db_path = Path(self.directory.name) / "warehouse.db"
         db.init_db(self.db_path)
@@ -27,15 +28,27 @@ class WarehouseFlowTests(unittest.TestCase):
         self.admin = self.connection.execute(
             "SELECT * FROM users WHERE username = ?", (ADMIN_USERNAME,)
         ).fetchone()
-        self.project_a = service.create_project(self.connection, self.admin, "A项目")
-        self.project_b = service.create_project(self.connection, self.admin, "B项目")
-        service.create_product(
-            self.connection, self.admin, "H001", "测试商品", "100g", "个"
+        self.warehouse = service.create_warehouse(
+            self.connection, self.admin, "主仓库"
         )
-        warehouse = service.create_warehouse(self.connection, self.admin, "主仓库")
         self.location = service.create_location(
-            self.connection, self.admin, warehouse["id"],
+            self.connection, self.admin, self.warehouse["id"],
             "A库区", "A货区", "A-01-01",
+        )
+        self.project_a = service.create_project(
+            self.connection, self.admin, "A项目",
+            self.warehouse["id"], "A库区",
+        )
+        self.project_b = service.create_project(
+            self.connection, self.admin, "B项目",
+            self.warehouse["id"], "A库区",
+        )
+        service.create_product(
+            self.connection, self.admin, "H001", "测试商品",
+            "100g", "个", "测试", None, None, 10,
+        )
+        service.set_project_products(
+            self.connection, self.admin, self.project_a["id"], ["H001"]
         )
         created = service.create_user(
             self.connection, self.admin, "zhangsan", "张三",
@@ -51,6 +64,7 @@ class WarehouseFlowTests(unittest.TestCase):
         self.directory.cleanup()
 
     def workbook(self, order_type, rows, project_id=None):
+        self.serial += 1
         columns = db.columns_for(
             self.connection, order_type, project_id or self.project_a["id"]
         )[1]
@@ -60,16 +74,27 @@ class WarehouseFlowTests(unittest.TestCase):
 
     def inbound_row(self, **overrides):
         values = [
-            "H001", "测试商品", "100g", "个", "B1", "2026-08-01", 10,
-            "2026-08-27", 3, "主仓库", "A库区", "A货区", "A-01-01",
-            "良品", "", "",
+            f"AUTO-RK-{self.serial:04d}", "2026-08-27", "H001", "良品",
+            "B1", "2026-08-01", "", 3, "个", "A-01-01", "", "",
         ]
         for key, value in overrides.items():
             values[{
-                "code": 0, "name": 1, "spec": 2, "unit": 3, "batch": 4,
-                "production": 5, "shelf": 6, "inbound": 7, "quantity": 8,
-                "warehouse": 9, "storage": 10, "cargo": 11, "location": 12,
-                "quality": 13, "purchase": 14, "note": 15,
+                "order_no": 0, "inbound": 1, "code": 2, "quality": 3,
+                "batch": 4, "production": 5, "expiry": 6, "quantity": 7,
+                "unit": 8, "location": 9, "purchase": 10, "note": 11,
+            }[key]] = value
+        return values
+
+    def outbound_row(self, **overrides):
+        values = [
+            f"AUTO-CK-{self.serial:04d}", "2026-08-27", "H001", "良品",
+            "", "", 1, "个", "", "", "",
+        ]
+        for key, value in overrides.items():
+            values[{
+                "order_no": 0, "outbound": 1, "code": 2, "quality": 3,
+                "batch": 4, "production": 5, "quantity": 6, "unit": 7,
+                "location": 8, "recipient": 9, "note": 10,
             }[key]] = value
         return values
 
@@ -120,7 +145,7 @@ class WarehouseFlowTests(unittest.TestCase):
                 self.connection,
                 self.user,
                 self.project_a["id"],
-                self.workbook("outbound", [["H001", "测试商品", 4, ""]]),
+                self.workbook("outbound", [self.outbound_row(quantity=4)]),
             )
         self.assertIn("可用库存为3件", caught.exception.errors[0]["message"])
         self.assertEqual(self.connection.execute("SELECT COUNT(*) FROM stock_orders").fetchone()[0], 1)
@@ -129,7 +154,7 @@ class WarehouseFlowTests(unittest.TestCase):
             self.connection,
             self.user,
             self.project_a["id"],
-            self.workbook("outbound", [["H001", "测试商品", 3, ""]]),
+            self.workbook("outbound", [self.outbound_row(quantity=3)]),
         )
         self.assertEqual(outbound["status"], "pending_picking")
         self.assertEqual(
@@ -156,7 +181,7 @@ class WarehouseFlowTests(unittest.TestCase):
                 self.connection,
                 self.user,
                 self.project_a["id"],
-                self.workbook("outbound", [["H001", "测试商品", 1, ""]]),
+                self.workbook("outbound", [self.outbound_row()]),
             )
 
     def test_import_reports_row_and_column_errors(self):
@@ -172,13 +197,13 @@ class WarehouseFlowTests(unittest.TestCase):
         messages = [error["message"] for error in caught.exception.errors]
         self.assertIn("生产批号不能为空", messages)
         self.assertIn("日期格式必须为yyyy-MM-dd", messages)
-        self.assertIn("标准单位数必须为正整数", messages)
+        self.assertIn("数量必须为正整数", messages)
 
     def test_templates_are_project_scoped(self):
         columns = service.get_template(
             self.connection, "inbound", self.project_a["id"]
         )["columns"]
-        columns[0]["name"] = "货品编码"
+        columns[0]["name"] = "入库通知单号（新）"
         updated = service.update_template(
             self.connection, self.user, self.project_a["id"], "inbound", columns
         )
@@ -187,7 +212,7 @@ class WarehouseFlowTests(unittest.TestCase):
             self.connection, "inbound", self.project_b["id"]
         )
         self.assertEqual(other["version"], 1)
-        self.assertEqual(other["columns"][0]["name"], "货品编号")
+        self.assertEqual(other["columns"][0]["name"], "入库通知单号")
 
     def test_login_lockout(self):
         for _ in range(4):

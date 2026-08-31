@@ -22,6 +22,7 @@ PROJECT_USER_PASSWORD = "Liuhaifeng456789"
 class WarehouseDataFactory:
     def __init__(self, db_path):
         self.db_path = db_path
+        self.order_serial = 0
         db.init_db(db_path)
         self.connection = db.connect(db_path)
 
@@ -47,27 +48,6 @@ class WarehouseDataFactory:
             "SELECT * FROM users WHERE username = 'zhangsan'"
         ).fetchone()
 
-        self.project_a = service.create_project(
-            self.connection, self.admin, "自动化测试项目A", "双角色验收"
-        )
-        self.project_b = service.create_project(
-            self.connection, self.admin, "隔离项目B", "项目隔离"
-        )
-        self.product = service.create_product(
-            self.connection, self.admin, "AUTO-P001", "自动测试商品", "100g", "个"
-        )
-        self.disabled_product = service.create_product(
-            self.connection, self.admin, "AUTO-P002", "停用商品", "200g", "箱"
-        )
-        service.update_product(
-            self.connection,
-            self.admin,
-            "AUTO-P002",
-            status="disabled",
-        )
-        self.disabled_product = self.connection.execute(
-            "SELECT * FROM products WHERE product_id = 'AUTO-P002'"
-        ).fetchone()
         self.warehouse = service.create_warehouse(
             self.connection, self.admin, "自动化测试仓", "测试地址"
         )
@@ -79,7 +59,38 @@ class WarehouseDataFactory:
             "A货区",
             "A-01",
         )
-
+        self.project_a = service.create_project(
+            self.connection, self.admin, "自动化测试项目A",
+            self.warehouse["id"], "A库区", "双角色验收",
+        )
+        self.project_b = service.create_project(
+            self.connection, self.admin, "隔离项目B",
+            self.warehouse["id"], "A库区", "项目隔离",
+        )
+        self.product = service.create_product(
+            self.connection, self.admin, "AUTO-P001", "自动测试商品",
+            "100g", "个", "测试分类", 0.1, 0.01, 30,
+        )
+        self.disabled_product = service.create_product(
+            self.connection, self.admin, "AUTO-P002", "停用商品", "200g", "箱"
+        )
+        service.set_project_products(
+            self.connection, self.admin, self.project_a["id"],
+            ["AUTO-P001"],
+        )
+        service.set_project_products(
+            self.connection, self.admin, self.project_b["id"],
+            ["AUTO-P001"],
+        )
+        service.update_product(
+            self.connection,
+            self.admin,
+            "AUTO-P002",
+            status="disabled",
+        )
+        self.disabled_product = self.connection.execute(
+            "SELECT * FROM products WHERE product_id = 'AUTO-P002'"
+        ).fetchone()
         created_project_user = service.create_user(
             self.connection,
             self.admin,
@@ -104,26 +115,24 @@ class WarehouseDataFactory:
         self.connection.close()
 
     def inbound_defaults(self):
+        self.order_serial += 1
         return {
+            "order_no": f"AUTO-RK-{self.order_serial:04d}",
+            "order_date": "2026-01-02",
             "product_code": "AUTO-P001",
-            "product_name": "自动测试商品",
-            "spec": "100g",
-            "unit": "个",
+            "quality_status": "良品",
             "batch_no": "AUTO-B001",
             "production_date": "2026-01-01",
-            "shelf_life_days": 30,
-            "inbound_date": "2026-01-02",
+            "expiry_date": "",
             "quantity": 5,
-            "warehouse_name": "自动化测试仓",
-            "storage_area": "A库区",
-            "cargo_area": "A货区",
+            "unit": "个",
             "location_name": "A-01",
-            "quality_status": "良品",
             "purchase_order_no": "AUTO-PO-001",
             "note": "",
         }
 
     def workbook(self, order_type, rows, project_id=None):
+        self.order_serial += 1
         _, columns = db.columns_for(
             self.connection,
             order_type,
@@ -132,9 +141,16 @@ class WarehouseDataFactory:
         values_by_key = {
             "inbound": self.inbound_defaults(),
             "outbound": {
+                "order_no": f"AUTO-CK-{self.order_serial:04d}",
+                "order_date": "2026-01-03",
                 "product_code": "AUTO-P001",
-                "product_name": "自动测试商品",
+                "quality_status": "良品",
+                "batch_no": "",
+                "production_date": "",
                 "quantity": 1,
+                "unit": "个",
+                "location_name": "",
+                "recipient": "自动化收货方",
                 "note": "",
             },
         }[order_type]

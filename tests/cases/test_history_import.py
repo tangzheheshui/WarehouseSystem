@@ -29,8 +29,16 @@ class HistoryImportTests(unittest.TestCase):
         self.admin = self.connection.execute(
             "SELECT * FROM users WHERE username = 'admin'"
         ).fetchone()
+        self.warehouse = service.create_warehouse(
+            self.connection, self.admin, "历史仓库"
+        )
+        service.create_location(
+            self.connection, self.admin, self.warehouse["id"],
+            "A库区", "A货区", "A-01",
+        )
         self.project = service.create_project(
-            self.connection, self.admin, "历史项目"
+            self.connection, self.admin, "历史项目",
+            self.warehouse["id"], "A库区",
         )
 
     def tearDown(self):

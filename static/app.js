@@ -3,6 +3,8 @@ const BASE_PATH = location.pathname
   .replace(/\/?$/, "/");
 const TOKEN_KEY = `wmsToken:${BASE_PATH}`;
 const PROJECT_KEY = `wmsProject:${BASE_PATH}`;
+const INVENTORY_VIEW_KEY = `wmsInventoryView:${BASE_PATH}`;
+const INVENTORY_COLUMNS_KEY = `wmsInventoryColumns:${BASE_PATH}`;
 
 const state = {
   token: localStorage.getItem(TOKEN_KEY) || "",
@@ -25,6 +27,11 @@ const state = {
   inventorySelectedIds: new Set(),
   inventorySelectedOnly: false,
   inventorySort: { key: null, direction: "asc" },
+  inventoryView: localStorage.getItem(INVENTORY_VIEW_KEY) || "detail",
+  inventoryVisibleColumns: new Set(
+    JSON.parse(localStorage.getItem(INVENTORY_COLUMNS_KEY) || "[]"),
+  ),
+  pickSort: "location",
 };
 
 const titles = {
@@ -367,6 +374,34 @@ function importResultHtml(result, type) {
 async function renderImportPage(type) {
   const label = type === "inbound" ? "入库" : "出库";
   const result = state.importResult[type] || {};
+  const manualFields = type === "inbound"
+    ? [
+        ["orderNo", "入库通知单号", "text"],
+        ["orderDate", "入库日期", "date"],
+        ["productCode", "货品编号", "text"],
+        ["qualityStatus", "品质标记", "quality"],
+        ["batchNo", "生产批号", "text"],
+        ["productionDate", "生产日期", "date"],
+        ["expiryDate", "到期日期", "date"],
+        ["quantity", "数量", "number"],
+        ["unit", "单位", "text"],
+        ["locationName", "货位", "text"],
+        ["purchaseOrderNo", "采购单号", "text"],
+        ["note", "备注", "text"],
+      ]
+    : [
+        ["orderNo", "配货单号", "text"],
+        ["orderDate", "出库日期", "date"],
+        ["productCode", "货品编号", "text"],
+        ["qualityStatus", "品质", "quality"],
+        ["batchNo", "生产批号", "text"],
+        ["productionDate", "生产日期", "date"],
+        ["quantity", "数量", "number"],
+        ["unit", "单位", "text"],
+        ["locationName", "指定货位", "text"],
+        ["recipient", "收货方", "text"],
+        ["note", "备注", "text"],
+      ];
   document.getElementById("page").innerHTML = `
     <div class="panel">
       <div class="panel-header"><h3>${label}导入</h3>
@@ -377,6 +412,21 @@ async function renderImportPage(type) {
       </form>
     </div>
     ${importResultHtml(result, type)}
+    <div class="panel">
+      <div class="panel-header"><h3>手动新增${label}</h3></div>
+      <form id="manualForm" class="fields-row wide">
+        ${manualFields.map(([name, fieldLabel, kind]) => {
+          if (kind === "quality") {
+            return `<label>${fieldLabel}<select name="${name}">
+              <option value="良品">良品</option><option value="扣留">扣留</option>
+            </select></label>`;
+          }
+          const attrs = kind === "date" ? " type=\"date\"" : kind === "number" ? " type=\"number\" min=\"1\" step=\"1\"" : "";
+          return `<label>${fieldLabel}<input name="${name}"${attrs}></label>`;
+        }).join("")}
+        <button class="btn primary" type="submit">提交</button>
+      </form>
+    </div>
     <div class="panel">
       <h3>${label}单</h3>
       <form id="orderFilter" class="fields-row">
@@ -402,6 +452,31 @@ async function renderImportPage(type) {
       state.importResult[type] = {
         visible: true, ok: true, orderNo: data.orderNo,
         pickNo: data.pickingOrder?.pick_no, aggregated: data.aggregated || [],
+      };
+      await renderImportPage(type);
+      toast(`${label}成功：${data.orderNo}`);
+    } catch (error) {
+      state.importResult[type] = {
+        visible: true, ok: false, error: error.message,
+        details: error.details || [],
+      };
+      await renderImportPage(type);
+      toast(error.message, true);
+    }
+  };
+  document.getElementById("manualForm").onsubmit = async event => {
+    event.preventDefault();
+    const button = event.target.querySelector("button[type=submit]");
+    button.disabled = true;
+    button.textContent = "处理中...";
+    const body = Object.fromEntries(new FormData(event.target));
+    if (body.quantity) body.quantity = Number(body.quantity);
+    try {
+      const data = await api(`${type}/manual`, { method: "POST", body });
+      state.importResult[type] = {
+        visible: true, ok: true, orderNo: data.orderNo,
+        pickNo: data.pickNo || data.pickingOrder?.pick_no,
+        aggregated: data.aggregated || [],
       };
       await renderImportPage(type);
       toast(`${label}成功：${data.orderNo}`);
@@ -472,12 +547,26 @@ async function renderInventory() {
     <div class="panel result-panel">
       <div class="panel-header">
         <div>
-          <h3>批次明细</h3>
+          <div class="view-toggle" id="inventoryViewToggle">
+            <button type="button" data-view="detail"
+              class="${state.inventoryView === "detail" ? "active" : ""}">库存明细</button>
+            <button type="button" data-view="summary"
+              class="${state.inventoryView === "summary" ? "active" : ""}">库存汇总</button>
+          </div>
           <div id="inventoryStats" class="table-stats"></div>
         </div>
         <div class="actions">
           <button class="btn small hidden" id="inventorySelectedOnly">仅看选中</button>
           <button class="btn small hidden" id="clearInventorySelection">清空勾选</button>
+          <details id="columnSettings" class="filter-popover">
+            <summary>显示列</summary>
+            <div class="filter-popover-panel column-panel">
+              ${inventoryColumns.map(column => `
+                <label class="check-line"><input type="checkbox" data-column="${column.key}"
+                  ${state.inventoryVisibleColumns.size === 0 || state.inventoryVisibleColumns.has(column.key) ? "checked" : ""}>
+                  ${column.label}</label>`).join("")}
+            </div>
+          </details>
           <button class="btn" id="exportInventory">导出Excel</button>
         </div>
       </div>
@@ -500,12 +589,31 @@ async function renderInventory() {
     document.getElementById("advancedFilter")?.removeAttribute("open");
     loadInventory(new FormData(form));
   };
+  document.querySelectorAll("#inventoryViewToggle button[data-view]").forEach(button => {
+    button.onclick = () => {
+      state.inventoryView = button.dataset.view;
+      localStorage.setItem(INVENTORY_VIEW_KEY, state.inventoryView);
+      renderInventory();
+    };
+  });
+  document.querySelectorAll("#columnSettings input[data-column]").forEach(checkbox => {
+    checkbox.onchange = () => {
+      if (checkbox.checked) state.inventoryVisibleColumns.add(checkbox.dataset.column);
+      else state.inventoryVisibleColumns.delete(checkbox.dataset.column);
+      localStorage.setItem(
+        INVENTORY_COLUMNS_KEY,
+        JSON.stringify([...state.inventoryVisibleColumns]),
+      );
+      renderInventoryTable();
+    };
+  });
   document.addEventListener("click", event => {
     const popover = document.getElementById("advancedFilter");
     if (popover?.open && !popover.contains(event.target)) popover.removeAttribute("open");
   });
   document.getElementById("exportInventory").onclick = () => {
-    const query = new URLSearchParams(new FormData(form)).toString();
+    let query = new URLSearchParams(new FormData(form)).toString();
+    if (state.inventoryView === "summary") query = `${query}&summary=1`;
     download(`inventory/export?${query}`, "库存查询结果.xlsx");
   };
   await loadInventory(new FormData(form));
@@ -569,13 +677,58 @@ function populateInventoryOptions(form) {
 async function loadInventory(form) {
   const tableNode = document.getElementById("inventoryTable");
   if (tableNode) tableNode.innerHTML = `<div class="empty">正在查询库存...</div>`;
-  const query = new URLSearchParams(form).toString();
+  let query = new URLSearchParams(form).toString();
+  if (state.inventoryView === "summary") query = `${query}&summary=1`;
   state.inventoryRows = await api(`inventory?${query}`);
   state.inventoryPage = 1;
   state.inventorySelectedIds.clear();
   state.inventorySelectedOnly = false;
   state.inventorySort = { key: null, direction: "asc" };
   renderInventoryTable();
+}
+
+function visibleInventoryColumns() {
+  if (!state.inventoryVisibleColumns.size) return inventoryColumns;
+  return inventoryColumns.filter(column =>
+    state.inventoryVisibleColumns.has(column.key),
+  );
+}
+
+function renderInventorySummaryTable(rows) {
+  const columns = [
+    { key: "product_id", label: "货品编号" },
+    { key: "product_name", label: "货品名称" },
+    { key: "total_quantity", label: "库存总数量" },
+    { key: "available_quantity", label: "可用库存" },
+    { key: "unit", label: "单位" },
+    { key: "warehouse_name", label: "所属仓库" },
+  ];
+  const sorted = [...rows].sort((a, b) =>
+    String(a.product_id).localeCompare(String(b.product_id), "zh-CN"),
+  );
+  const totalQuantity = sorted.reduce((sum, row) => sum + row.total_quantity, 0);
+  const available = sorted.reduce((sum, row) => sum + row.available_quantity, 0);
+  const stats = document.getElementById("inventoryStats");
+  if (stats) stats.innerHTML = `
+    <span class="chip">货品 ${sorted.length}</span>
+    <span class="chip tone-blue">库存 ${totalQuantity}</span>
+    <span class="chip tone-green">可用 ${available}</span>`;
+  document.getElementById("inventoryTable").innerHTML = !sorted.length
+    ? `<div class="empty">没有符合条件的库存</div>`
+    : `<div class="inventory-table-wrap">
+        <table class="data-table">
+          <thead><tr>${columns.map(column =>
+            `<th>${column.label}</th>`).join("")}</tr></thead>
+          <tbody>${sorted.map(row => `<tr>
+            <td class="mono product-code">${esc(row.product_id)}</td>
+            <td>${esc(row.product_name)}</td>
+            <td>${row.total_quantity}</td>
+            <td>${row.available_quantity}</td>
+            <td>${esc(row.unit || "-")}</td>
+            <td>${esc(row.warehouse_name || "-")}</td>
+          </tr>`).join("")}</tbody>
+        </table>
+      </div>`;
 }
 
 function inventoryExpiry(value) {
@@ -660,6 +813,12 @@ function inventoryTableCell(row, column) {
 function renderInventoryTable() {
   const selectedOnlyButton = document.getElementById("inventorySelectedOnly");
   const clearButton = document.getElementById("clearInventorySelection");
+  if (state.inventoryView === "summary") {
+    if (selectedOnlyButton) selectedOnlyButton.classList.add("hidden");
+    if (clearButton) clearButton.classList.add("hidden");
+    renderInventorySummaryTable(state.inventoryRows);
+    return;
+  }
   if (!state.inventorySelectedIds.size) state.inventorySelectedOnly = false;
 
   const sourceRows = state.inventorySelectedOnly
@@ -701,7 +860,7 @@ function renderInventoryTable() {
           <th class="check-cell">
             <input type="checkbox" id="selectInventoryPage" class="table-check" ${allPageSelected ? "checked" : ""} aria-label="选择本页">
           </th>
-          ${inventoryColumns.map(column => {
+          ${visibleInventoryColumns().map(column => {
             const active = state.inventorySort.key === column.key;
             const mark = active ? (state.inventorySort.direction === "asc" ? "▲" : "▼") : "↕";
             return `<th class="sortable ${active ? "sort-active" : ""}" data-sort-key="${column.key}"
@@ -715,7 +874,7 @@ function renderInventoryTable() {
             <td class="index-cell">${pageStart + index + 1}</td>
             <td class="check-cell"><input type="checkbox" class="table-check" data-inventory-id="${row.id}"
               ${selected ? "checked" : ""} aria-label="选择批次 ${esc(row.batch_no)}"></td>
-            ${inventoryColumns.map(column => inventoryTableCell(row, column)).join("")}
+            ${visibleInventoryColumns().map(column => inventoryTableCell(row, column)).join("")}
           </tr>`;
         }).join("")}</tbody>
       </table>
@@ -835,7 +994,7 @@ async function loadPicking() {
   const status = document.getElementById("pickStatus").value;
   const rows = await api(`picking-orders${status ? `?status=${status}` : ""}`);
   document.getElementById("pickList").innerHTML = simpleTable(
-    ["拣货单号", "出库单号", "状态", "生成时间", "操作"],
+    ["分拣组号", "配货单号", "状态", "生成时间", "操作"],
     rows.map(row => [
       `<span class="mono">${esc(row.pick_no)}</span>`,
       `<span class="mono">${esc(row.outbound_order_no)}</span>`,
@@ -861,25 +1020,39 @@ async function loadPickingDetail(id) {
   const order = state.pickingDetail.order;
   const items = state.pickingDetail.items;
   document.getElementById("pickActions").innerHTML = `
+    <select id="pickSort" aria-label="打印排序">
+      <option value="location" ${state.pickSort === "location" ? "selected" : ""}>按货位排序</option>
+      <option value="product" ${state.pickSort === "product" ? "selected" : ""}>按货品编号排序</option>
+    </select>
     <button class="btn" id="printPick">打印A4</button>
     <button class="btn" id="exportPick">导出Excel</button>
     ${order.status === "pending" ? `<button class="btn success" id="completePick">拣货完成</button>` : ""}`;
+  const sortedItems = sortedPickItems(items);
   document.getElementById("pickDetail").innerHTML = `
     <div class="pick-detail">
       <div class="pick-head">
-        <div><span class="muted">拣货单号</span><br><strong class="mono">${esc(order.pick_no)}</strong></div>
-        <div><span class="muted">出库单号</span><br><strong class="mono">${esc(order.outbound_order_no)}</strong></div>
+        <div><span class="muted">分拣组号</span><br><strong class="mono">${esc(order.pick_no)}</strong></div>
+        <div><span class="muted">出库通知单号</span><br><strong class="mono">${esc(order.outbound_order_no)}</strong></div>
+        <div><span class="muted">出货日期</span><br><strong>${esc(order.outbound_date || "-")}</strong></div>
+        <div><span class="muted">收货方</span><br><strong>${esc(order.recipient || "-")}</strong></div>
         <div><span class="muted">状态</span><br>${setStatus(order.status)}</div>
         <div><span class="muted">生成时间</span><br><strong>${formatTime(order.generated_at)}</strong></div>
       </div>
-      ${simpleTable(["顺序", "货位", "货品编号", "货品名称", "规格", "生产批号", "标准单位数"],
-        items.map(item => [item.sequence, esc(item.location.full_name),
+      ${simpleTable(["序号", "货品编号", "货品名称", "生产日期", "生产批号", "品质", "货位", "分拣总数", "单位"],
+        sortedItems.map((item, index) => [index + 1,
           `<span class="mono">${esc(item.product_id)}</span>`, esc(item.product_name),
-          esc(item.spec || "-"), esc(item.batch_no), item.quantity]))}
+          esc(item.production_date || "-"), esc(item.batch_no),
+          esc(item.quality_status || "良品"), esc(item.location.full_name),
+          item.quantity, esc(item.unit || "-")]))}
     </div>`;
+  const sortSelect = document.getElementById("pickSort");
+  if (sortSelect) sortSelect.onchange = () => {
+    state.pickSort = sortSelect.value;
+    loadPickingDetail(id);
+  };
   document.getElementById("printPick").onclick = () => printPicking(state.pickingDetail);
   document.getElementById("exportPick").onclick = () =>
-    download(`picking-orders/${id}/export`, `picking-${order.pick_no}.xlsx`);
+    download(`picking-orders/${id}/export?sort=${state.pickSort}`, `picking-${order.pick_no}.xlsx`);
   const completeButton = document.getElementById("completePick");
   if (completeButton) completeButton.onclick = async () => {
     try {
@@ -890,15 +1063,58 @@ async function loadPickingDetail(id) {
   };
 }
 
+function sortedPickItems(items) {
+  return [...items].sort((a, b) => {
+    const product = String(a.product_id).localeCompare(String(b.product_id), "zh-CN")
+      || String(a.location.full_name).localeCompare(String(b.location.full_name), "zh-CN")
+      || String(a.batch_no).localeCompare(String(b.batch_no), "zh-CN");
+    if (state.pickSort === "product") return product;
+    return String(a.location.full_name).localeCompare(String(b.location.full_name), "zh-CN")
+      || String(a.product_id).localeCompare(String(b.product_id), "zh-CN")
+      || String(a.batch_no).localeCompare(String(b.batch_no), "zh-CN");
+  });
+}
+
 function printPicking(detail) {
   const order = detail.order;
+  const items = sortedPickItems(detail.items);
+  const pageSize = 18;
+  const pages = [];
+  for (let start = 0; start < items.length; start += pageSize) {
+    pages.push(items.slice(start, start + pageSize));
+  }
+  const total = Math.max(1, pages.length);
   document.getElementById("printArea").innerHTML = `
     <h1>拣货单</h1>
-    <div class="meta">拣货单号：${esc(order.pick_no)} 出库单号：${esc(order.outbound_order_no)} 生成时间：${formatTime(order.generated_at)}</div>
-    ${simpleTable(["顺序", "货位", "货品编号", "货品名称", "规格", "生产批号", "标准单位数"],
-      detail.items.map(item => [item.sequence, esc(item.location.full_name),
-        esc(item.product_id), esc(item.product_name), esc(item.spec || "-"),
-        esc(item.batch_no), item.quantity]))}`;
+    ${pages.map((pageItems, pageIndex) => `
+      <div class="print-page">
+        <div class="meta">
+          <span>分拣组号：${esc(order.pick_no)}</span>
+          <span>出库通知单号：${esc(order.outbound_order_no)}</span>
+          <span>出货日期：${esc(order.outbound_date || "-")}</span>
+          <span>收货方：${esc(order.recipient || "-")}</span>
+        </div>
+        <table>
+          <thead><tr>
+            <th>序号</th><th>货品编号</th><th>货品名称</th><th>生产日期</th>
+            <th>生产批号</th><th>品质</th><th>货位</th><th>分拣总数</th><th>单位</th>
+          </tr></thead>
+          <tbody>
+            ${pageItems.map((item, index) => `<tr>
+              <td>${pageIndex * pageSize + index + 1}</td>
+              <td>${esc(item.product_id)}</td>
+              <td>${esc(item.product_name)}</td>
+              <td>${esc(item.production_date || "-")}</td>
+              <td>${esc(item.batch_no)}</td>
+              <td>${esc(item.quality_status || "良品")}</td>
+              <td>${esc(item.location.full_name)}</td>
+              <td>${item.quantity}</td>
+              <td>${esc(item.unit || "-")}</td>
+            </tr>`).join("")}
+          </tbody>
+        </table>
+        <div class="print-footer">1-${pageIndex + 1} · 第${pageIndex + 1}页/共${total}页</div>
+      </div>`).join("")}`;
   window.print();
 }
 
@@ -911,8 +1127,12 @@ async function renderProducts() {
       <form id="productForm" class="fields-row wide">
         <label>货品编号<input name="productCode" required ${editing ? "readonly" : ""}></label>
         <label>货品名称<input name="productName" required></label>
+        <label>货品分类<input name="category"></label>
         <label>规格<input name="spec"></label>
-        <label>标准单位<input name="unit"></label>
+        <label>单位<input name="unit"></label>
+        <label>单件重量<input name="unitWeight" type="number" min="0" step="any"></label>
+        <label>体积<input name="volume" type="number" min="0" step="any"></label>
+        <label>保质天数<input name="shelfLifeDays" type="number" min="1" step="1"></label>
         <label>状态<select name="status"><option value="active">启用</option>
           <option value="disabled">停用</option></select></label>
         <button class="btn primary" type="submit">${editing ? "保存" : "创建"}</button>
@@ -927,8 +1147,12 @@ async function renderProducts() {
     const form = document.getElementById("productForm");
     form.productCode.value = editing.product_id;
     form.productName.value = editing.product_name;
+    form.category.value = editing.category || "";
     form.spec.value = editing.spec || "";
     form.unit.value = editing.unit || "";
+    form.unitWeight.value = editing.unit_weight ?? "";
+    form.volume.value = editing.volume ?? "";
+    form.shelfLifeDays.value = editing.shelf_life_days ?? "";
     form.status.value = editing.status;
     document.getElementById("cancelProduct").onclick = () => {
       state.editingProduct = null;
@@ -938,13 +1162,18 @@ async function renderProducts() {
   document.getElementById("productForm").onsubmit = async event => {
     event.preventDefault();
     const data = Object.fromEntries(new FormData(event.target));
+    ["unitWeight", "volume", "shelfLifeDays"].forEach(key => {
+      if (data[key] !== "") data[key] = Number(data[key]);
+    });
     try {
       if (state.editingProduct) {
         await api(`products/${encodeURIComponent(data.productCode)}`, {
           method: "PUT",
           body: {
             productName: data.productName, spec: data.spec,
-            unit: data.unit, status: data.status,
+            unit: data.unit, category: data.category,
+            unitWeight: data.unitWeight, volume: data.volume,
+            shelfLifeDays: data.shelfLifeDays, status: data.status,
           },
         });
       } else {
@@ -966,10 +1195,12 @@ async function loadProducts(form = new FormData()) {
   const query = new URLSearchParams(form).toString();
   const rows = await api(`products${query ? `?${query}` : ""}`);
   document.getElementById("productTable").innerHTML = simpleTable(
-    ["货品编号", "货品名称", "规格", "标准单位", "状态", "操作"],
+    ["货品编号", "货品名称", "分类", "规格", "单位", "重量", "体积", "保质天数", "状态", "操作"],
     rows.map(row => [
       `<span class="mono">${esc(row.product_id)}</span>`, esc(row.product_name),
-      esc(row.spec || "-"), esc(row.unit || "-"), setStatus(row.status),
+      esc(row.category || "-"), esc(row.spec || "-"), esc(row.unit || "-"),
+      row.unit_weight ?? "-", row.volume ?? "-", row.shelf_life_days ?? "-",
+      setStatus(row.status),
       `<button class="btn small" data-id="${esc(row.product_id)}">修改</button>`,
     ]),
   );
@@ -1066,19 +1297,50 @@ async function renderProjects() {
   if (!state.projects.length || state.user.role !== "admin") {
     state.projects = await api("projects");
   }
+  const warehouses = await api("warehouses");
+  const products = await api("products?status=active");
   const projects = state.user.role === "admin"
     ? state.projects : state.projects;
   const editing = state.editingProject;
+  const storageAreas = editing
+    ? (warehouses.find(item => String(item.id) === String(editing.warehouse_id))?.locations || [])
+        .map(location => location.storage_area)
+    : [];
   document.getElementById("page").innerHTML = `
     <div class="panel">
       <div class="panel-header"><h3>${editing ? "修改项目" : "创建项目"}</h3>
         ${editing ? `<button class="btn" id="cancelProject">取消修改</button>` : ""}</div>
       <form id="projectForm" class="fields-row">
         <label>项目名称<input name="projectName" required></label>
+        <label>绑定仓库<select name="warehouseId" required>
+          <option value="">请选择仓库</option>
+          ${warehouses.filter(item => item.status === "active").map(item =>
+            `<option value="${item.id}" ${editing && String(editing.warehouse_id) === String(item.id) ? "selected" : ""}>${esc(item.warehouse_name)}</option>`
+          ).join("")}
+        </select></label>
+        <label>绑定库区<select name="storageArea" required>
+          <option value="">请选择库区</option>
+          ${[...new Set(storageAreas)].map(area =>
+            `<option value="${esc(area)}" ${editing && editing.storage_area === area ? "selected" : ""}>${esc(area)}</option>`
+          ).join("")}
+        </select></label>
         <label>项目说明<input name="remark"></label>
         <label>状态<select name="status"><option value="active">启用</option>
           <option value="disabled">停用</option></select></label>
         <button class="btn primary" type="submit">${editing ? "保存" : "创建"}</button>
+      </form>
+    </div>
+    <div class="panel">
+      <div class="panel-header"><h3>项目可用商品</h3></div>
+      <form id="projectProductsForm" class="fields-row">
+        <label>项目<select name="projectId" required>
+          <option value="">请选择项目</option>
+          ${projects.map(item => `<option value="${item.id}">${esc(item.project_name)}</option>`).join("")}
+        </select></label>
+        <label>商品（按住Ctrl可多选）<select name="productIds" multiple size="6">
+          ${products.map(item => `<option value="${esc(item.product_id)}">${esc(item.product_id)} · ${esc(item.product_name)}</option>`).join("")}
+        </select></label>
+        <button class="btn primary" type="submit">保存商品</button>
       </form>
     </div>
     <div class="panel">
@@ -1090,19 +1352,44 @@ async function renderProjects() {
     form.projectName.value = editing.project_name;
     form.remark.value = editing.remark || "";
     form.status.value = editing.status;
+    if (editing.warehouse_id) {
+      const select = form.warehouseId;
+      select.value = String(editing.warehouse_id);
+      const areas = [...new Set(
+        (warehouses.find(item => String(item.id) === String(editing.warehouse_id))?.locations || [])
+          .map(location => location.storage_area),
+      )];
+      form.storageArea.innerHTML = `<option value="">请选择库区</option>` + areas.map(area =>
+        `<option value="${esc(area)}" ${editing.storage_area === area ? "selected" : ""}>${esc(area)}</option>`,
+      ).join("");
+    }
     document.getElementById("cancelProject").onclick = () => {
       state.editingProject = null;
       renderProjects();
     };
   }
+  document.getElementById("projectForm").warehouseId.onchange = event => {
+    const warehouse = warehouses.find(item => String(item.id) === event.target.value);
+    const areas = [...new Set((warehouse?.locations || []).map(location => location.storage_area))];
+    document.getElementById("projectForm").storageArea.innerHTML =
+      `<option value="">请选择库区</option>` + areas.map(area =>
+        `<option value="${esc(area)}">${esc(area)}</option>`,
+      ).join("");
+  };
   document.getElementById("projectForm").onsubmit = async event => {
     event.preventDefault();
     const data = Object.fromEntries(new FormData(event.target));
     try {
       if (editing) {
-        await api(`projects/${editing.id}`, { method: "PUT", body: data });
+        await api(`projects/${editing.id}`, {
+          method: "PUT",
+          body: { ...data, warehouseId: Number(data.warehouseId) },
+        });
       } else {
-        await api("projects", { method: "POST", body: data });
+        await api("projects", {
+          method: "POST",
+          body: { ...data, warehouseId: Number(data.warehouseId) },
+        });
       }
       state.editingProject = null;
       state.projects = [];
@@ -1110,10 +1397,35 @@ async function renderProjects() {
       await renderProjects();
     } catch (error) { toast(error.message, true); }
   };
+  const productForm = document.getElementById("projectProductsForm");
+  productForm.projectId.onchange = () => {
+    const project = projects.find(item => String(item.id) === productForm.projectId.value);
+    [...productForm.productIds.options].forEach(option => {
+      option.selected = project?.productIds?.includes(option.value) || false;
+    });
+  };
+  productForm.onsubmit = async event => {
+    event.preventDefault();
+    const projectId = productForm.projectId.value;
+    if (!projectId) return toast("请选择项目", true);
+    try {
+      await api(`projects/${projectId}/products`, {
+        method: "PUT",
+        body: {
+          productIds: [...productForm.productIds.selectedOptions].map(option => option.value),
+        },
+      });
+      state.projects = [];
+      toast("项目商品已保存");
+      await renderProjects();
+    } catch (error) { toast(error.message, true); }
+  };
   document.getElementById("projectTable").innerHTML = simpleTable(
-    ["项目", "状态", "项目管理员", "库存批次", "说明", "操作"],
+    ["项目", "仓库 / 库区", "状态", "项目管理员", "库存批次", "说明", "操作"],
     projects.map(project => [
-      esc(project.project_name), setStatus(project.status), project.user_count || 0,
+      esc(project.project_name),
+      `${esc(project.warehouse_name || "-")} / ${esc(project.storage_area || "-")}`,
+      setStatus(project.status), project.user_count || 0,
       project.lot_count ?? 0, esc(project.remark || "-"),
       `<div class="actions">
         <button class="btn small" data-action="edit" data-id="${project.id}">修改</button>

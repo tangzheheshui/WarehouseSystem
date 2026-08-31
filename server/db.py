@@ -12,27 +12,30 @@ DEFAULT_DB_PATH = PROJECT_ROOT / "data" / "warehouse.db"
 
 DEFAULT_TEMPLATES = {
     "inbound": [
+        {"key": "order_no", "name": "入库通知单号", "required": True, "type": "text"},
+        {"key": "order_date", "name": "入库日期", "required": True, "type": "date"},
         {"key": "product_code", "name": "货品编号", "required": True, "type": "text"},
-        {"key": "product_name", "name": "货品名称", "required": True, "type": "text"},
-        {"key": "spec", "name": "规格", "required": False, "type": "text"},
-        {"key": "unit", "name": "标准单位", "required": False, "type": "text"},
+        {"key": "quality_status", "name": "品质标记", "required": False, "type": "text"},
         {"key": "batch_no", "name": "生产批号", "required": True, "type": "text"},
         {"key": "production_date", "name": "生产日期", "required": True, "type": "date"},
-        {"key": "shelf_life_days", "name": "保质期（天）", "required": True, "type": "integer"},
-        {"key": "inbound_date", "name": "入库日", "required": True, "type": "date"},
-        {"key": "quantity", "name": "标准单位数", "required": True, "type": "integer"},
-        {"key": "warehouse_name", "name": "仓库", "required": True, "type": "text"},
-        {"key": "storage_area", "name": "库区", "required": True, "type": "text"},
-        {"key": "cargo_area", "name": "货区", "required": True, "type": "text"},
+        {"key": "expiry_date", "name": "到期日期", "required": False, "type": "date"},
+        {"key": "quantity", "name": "数量", "required": True, "type": "integer"},
+        {"key": "unit", "name": "单位", "required": True, "type": "text"},
         {"key": "location_name", "name": "货位", "required": True, "type": "text"},
-        {"key": "quality_status", "name": "品质标记", "required": True, "type": "text"},
         {"key": "purchase_order_no", "name": "采购单号", "required": False, "type": "text"},
         {"key": "note", "name": "备注", "required": False, "type": "text"},
     ],
     "outbound": [
+        {"key": "order_no", "name": "配货单号", "required": True, "type": "text"},
+        {"key": "order_date", "name": "出库日期", "required": True, "type": "date"},
         {"key": "product_code", "name": "货品编号", "required": True, "type": "text"},
-        {"key": "product_name", "name": "货品名称", "required": True, "type": "text"},
-        {"key": "quantity", "name": "标准单位数", "required": True, "type": "integer"},
+        {"key": "quality_status", "name": "品质", "required": False, "type": "text"},
+        {"key": "batch_no", "name": "生产批号", "required": False, "type": "text"},
+        {"key": "production_date", "name": "生产日期", "required": False, "type": "date"},
+        {"key": "quantity", "name": "数量", "required": True, "type": "integer"},
+        {"key": "unit", "name": "单位", "required": True, "type": "text"},
+        {"key": "location_name", "name": "指定货位", "required": False, "type": "text"},
+        {"key": "recipient", "name": "收货方", "required": False, "type": "text"},
         {"key": "note", "name": "备注", "required": False, "type": "text"},
     ],
 }
@@ -44,6 +47,8 @@ CREATE TABLE IF NOT EXISTS projects (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     project_name TEXT NOT NULL UNIQUE,
     status TEXT NOT NULL CHECK(status IN ('active', 'disabled')),
+    warehouse_id INTEGER REFERENCES warehouses(id),
+    storage_area TEXT,
     remark TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
@@ -106,9 +111,20 @@ CREATE TABLE IF NOT EXISTS products (
     product_name TEXT NOT NULL,
     spec TEXT,
     unit TEXT,
+    category TEXT,
+    unit_weight REAL,
+    volume REAL,
+    shelf_life_days INTEGER,
     status TEXT NOT NULL DEFAULT 'active' CHECK(status IN ('active', 'disabled')),
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS project_products (
+    project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    product_id TEXT NOT NULL REFERENCES products(product_id),
+    created_at TEXT NOT NULL,
+    PRIMARY KEY(project_id, product_id)
 );
 
 CREATE TABLE IF NOT EXISTS inventory (
@@ -142,6 +158,8 @@ CREATE TABLE IF NOT EXISTS stock_orders (
     operator_name TEXT NOT NULL,
     template_version INTEGER NOT NULL,
     note TEXT,
+    order_date TEXT,
+    recipient TEXT,
     created_at TEXT NOT NULL,
     completed_at TEXT
 );
@@ -191,6 +209,8 @@ CREATE TABLE IF NOT EXISTS picking_items (
     product_name TEXT NOT NULL,
     spec TEXT,
     batch_no TEXT NOT NULL,
+    production_date TEXT,
+    quality_status TEXT,
     quantity INTEGER NOT NULL CHECK(quantity > 0),
     location_id INTEGER NOT NULL REFERENCES warehouse_locations(id),
     sequence INTEGER NOT NULL
@@ -215,6 +235,11 @@ CREATE TABLE IF NOT EXISTS audit_logs (
     action TEXT NOT NULL,
     detail TEXT,
     created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS meta (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL
 );
 """
 
@@ -324,6 +349,11 @@ def _migrate_legacy(connection):
             VALUES ('默认仓库', 'active', {sql_now}, {sql_now})"""
     )
     warehouse_id = connection.execute("SELECT last_insert_rowid()").fetchone()[0]
+    connection.execute(
+        """UPDATE projects SET warehouse_id = ?, storage_area = '默认库区'
+           WHERE id = ?""",
+        (warehouse_id, project_id),
+    )
 
     admin_configured = False
     for row in data.get("users", []):
@@ -369,6 +399,11 @@ def _migrate_legacy(connection):
                VALUES (?, ?, ?, NULL, 'active', ?, ?)""",
             (row["product_id"], row["product_name"], row["spec"],
              row["created_at"], row["updated_at"]),
+        )
+        connection.execute(
+            """INSERT OR IGNORE INTO project_products(project_id, product_id, created_at)
+               VALUES (?, ?, ?)""",
+            (project_id, row["product_id"], migration_now),
         )
 
     location_ids = {}
@@ -519,6 +554,8 @@ def init_db(path=None):
 
         with connection:
             connection.executescript(SCHEMA)
+            _migrate_v4_columns(connection)
+            _reset_templates_v4(connection)
             if connection.execute("SELECT COUNT(*) FROM projects").fetchone()[0] == 0:
                 connection.execute(
                     """INSERT INTO projects
@@ -533,6 +570,7 @@ def init_db(path=None):
                        VALUES ('默认仓库', 'active',
                                datetime('now'), datetime('now'))"""
                 )
+            _bind_default_project_warehouse(connection)
             for project in connection.execute("SELECT id FROM projects").fetchall():
                 for template_type, columns in DEFAULT_TEMPLATES.items():
                     connection.execute(
@@ -560,6 +598,113 @@ def init_db(path=None):
             connection.executescript(INDEXES)
     finally:
         connection.close()
+
+
+def _migrate_v4_columns(connection):
+    """Add V4 columns to databases created before V4."""
+    product_columns = _columns(connection, "products")
+    additions = {
+        "category": "TEXT",
+        "unit_weight": "REAL",
+        "volume": "REAL",
+        "shelf_life_days": "INTEGER",
+    }
+    for name, column_type in additions.items():
+        if name not in product_columns:
+            connection.execute(
+                f"ALTER TABLE products ADD COLUMN {name} {column_type}"
+            )
+    project_columns = _columns(connection, "projects")
+    if "warehouse_id" not in project_columns:
+        connection.execute(
+            "ALTER TABLE projects ADD COLUMN warehouse_id INTEGER REFERENCES warehouses(id)"
+        )
+    if "storage_area" not in project_columns:
+        connection.execute("ALTER TABLE projects ADD COLUMN storage_area TEXT")
+    order_columns = _columns(connection, "stock_orders")
+    if "order_date" not in order_columns:
+        connection.execute("ALTER TABLE stock_orders ADD COLUMN order_date TEXT")
+    if "recipient" not in order_columns:
+        connection.execute("ALTER TABLE stock_orders ADD COLUMN recipient TEXT")
+    picking_columns = _columns(connection, "picking_items")
+    if "production_date" not in picking_columns:
+        connection.execute(
+            "ALTER TABLE picking_items ADD COLUMN production_date TEXT"
+        )
+    if "quality_status" not in picking_columns:
+        connection.execute("ALTER TABLE picking_items ADD COLUMN quality_status TEXT")
+    connection.execute(
+        """CREATE TABLE IF NOT EXISTS project_products (
+            project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+            product_id TEXT NOT NULL REFERENCES products(product_id),
+            created_at TEXT NOT NULL,
+            PRIMARY KEY(project_id, product_id)
+        )"""
+    )
+    connection.execute(
+        """CREATE TABLE IF NOT EXISTS meta (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL
+        )"""
+    )
+
+
+def _reset_templates_v4(connection):
+    """Reset project templates to V4 defaults once."""
+    done = connection.execute(
+        "SELECT 1 FROM meta WHERE key = 'template_v4'"
+    ).fetchone()
+    if done:
+        return
+    now = "datetime('now')"
+    for project in connection.execute("SELECT id FROM projects").fetchall():
+        for template_type, columns in DEFAULT_TEMPLATES.items():
+            connection.execute(
+                """INSERT INTO templates
+                   (project_id, template_type, version, columns_json, status, updated_at)
+                   VALUES (?, ?, 1, ?, 'active', datetime('now'))
+                   ON CONFLICT(project_id, template_type) DO UPDATE SET
+                       version = 1, columns_json = excluded.columns_json,
+                       status = 'active', updated_at = excluded.updated_at""",
+                (project["id"], template_type,
+                 json.dumps(columns, ensure_ascii=False)),
+            )
+    connection.execute(
+        "INSERT INTO meta(key, value) VALUES ('template_v4', '1')"
+    )
+
+
+def _bind_default_project_warehouse(connection):
+    """Bind projects without a warehouse to the first active warehouse."""
+    row = connection.execute(
+        """SELECT id, warehouse_name FROM warehouses
+           WHERE status = 'active' ORDER BY id LIMIT 1"""
+    ).fetchone()
+    if not row:
+        return
+    location = connection.execute(
+        """SELECT storage_area FROM warehouse_locations
+           WHERE warehouse_id = ? AND status = 'active'
+           ORDER BY id LIMIT 1""",
+        (row["id"],),
+    ).fetchone()
+    if not location:
+        connection.execute(
+            """INSERT INTO warehouse_locations
+               (warehouse_id, storage_area, cargo_area, location_name, status,
+                created_at, updated_at)
+               VALUES (?, '默认库区', '默认货区', '默认货位', 'active',
+                       datetime('now'), datetime('now'))""",
+            (row["id"],),
+        )
+        storage_area = "默认库区"
+    else:
+        storage_area = location["storage_area"]
+    connection.execute(
+        """UPDATE projects SET warehouse_id = ?, storage_area = ?
+           WHERE warehouse_id IS NULL""",
+        (row["id"], storage_area),
+    )
 
 
 def columns_for(connection, template_type, project_id):

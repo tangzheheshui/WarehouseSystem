@@ -427,10 +427,48 @@ tbody tr:hover { background: #f8fafb; }
 .pick-detail { display: grid; gap: 14px; }
 .pick-head {
   display: grid;
-  grid-template-columns: repeat(4, minmax(120px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
   gap: 10px;
 }
 .print-area { display: none; }
+
+.view-toggle {
+  display: inline-flex;
+  gap: 0;
+  border: 1px solid var(--line-strong);
+  border-radius: 6px;
+  overflow: hidden;
+  margin-bottom: 8px;
+}
+.view-toggle button {
+  padding: 6px 14px;
+  border: 0;
+  border-right: 1px solid var(--line-strong);
+  background: #fff;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 13px;
+}
+.view-toggle button:last-child { border-right: 0; }
+.view-toggle button.active {
+  background: var(--sidebar);
+  color: #fff;
+  font-weight: 600;
+}
+.column-panel {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(120px, 1fr));
+  gap: 6px 14px;
+  min-width: 280px;
+}
+.check-line {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  white-space: nowrap;
+}
+.check-line input { margin: 0; }
 
 /* Modern operations layout */
 body {
@@ -783,8 +821,17 @@ table.data-table tbody tr:hover { background: #edf4fb; }
   }
   .print-area h1 { margin: 0 0 6px; font-size: 21px; }
   .print-area .meta { margin-bottom: 14px; }
+  .print-area .meta span { margin-right: 18px; }
   .print-area table { width: 100%; border-collapse: collapse; }
   .print-area th, .print-area td { border: 1px solid #666; padding: 7px; }
   .print-area th { background: #eee; }
+  .print-page { page-break-after: always; }
+  .print-page:last-child { page-break-after: auto; }
+  .print-footer {
+    margin-top: 8px;
+    text-align: right;
+    font-size: 12px;
+    color: #333;
+  }
   @page { size: A4; margin: 12mm; }
 }

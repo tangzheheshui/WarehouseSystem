@@ -79,7 +79,8 @@ class WorkflowAcceptanceTests(unittest.TestCase):
             )
         with self.assertRaisesRegex(ValueError, "项目名称已存在"):
             service.create_project(
-                self.connection, self.admin, "自动化测试项目A"
+                self.connection, self.admin, "自动化测试项目A",
+                self.warehouse["id"], "A库区",
             )
 
     def test_template_is_project_scoped_and_disabled_import_rejected(self):
@@ -168,7 +169,7 @@ class WorkflowAcceptanceTests(unittest.TestCase):
         )
         self.assertEqual(first["status"], "completed")
         self.assertEqual(second["status"], "completed")
-        self.assertTrue(first["orderNo"].startswith("RK"))
+        self.assertTrue(first["orderNo"].startswith("AUTO-RK"))
 
         inventory = service.list_inventory(
             self.connection, self.project_user, self.project_a["id"]
@@ -197,7 +198,7 @@ class WorkflowAcceptanceTests(unittest.TestCase):
 
     def test_inbound_archive_and_field_errors_are_atomic(self):
         scenarios = [
-            {"product_name": "错误商品"},
+            {"unit": "错误单位"},
             {"quantity": 0},
             {"location_name": "不存在货位"},
             {"production_date": "2026-1-1"},
@@ -253,8 +254,8 @@ class WorkflowAcceptanceTests(unittest.TestCase):
             self.project_user,
             self.project_a["id"],
             self.fixture.workbook("inbound", [
-                {"batch_no": "AUTO-B001", "inbound_date": "2026-01-01", "quantity": 5},
-                {"batch_no": "AUTO-B002", "inbound_date": "2026-01-02", "quantity": 5},
+                {"batch_no": "AUTO-B001", "order_date": "2026-01-01", "quantity": 5},
+                {"batch_no": "AUTO-B002", "order_date": "2026-01-02", "quantity": 5},
             ]),
         )
         self.connection.execute(
@@ -419,6 +420,143 @@ class WorkflowAcceptanceTests(unittest.TestCase):
             auth.login(self.connection, "liuhaifeng", PROJECT_USER_PASSWORD)
         _, public = auth.login(self.connection, "liuhaifeng", "Reset123456")
         self.assertTrue(public["mustChangePassword"])
+
+    def test_manual_entry_creates_orders_and_inventory(self):
+        inbound = service.create_manual_inbound(
+            self.connection,
+            self.project_user,
+            self.project_a["id"],
+            {
+                "orderNo": "AUTO-RK-MANUAL-001",
+                "orderDate": "2026-02-01",
+                "productCode": "AUTO-P001",
+                "qualityStatus": "良品",
+                "batchNo": "AUTO-MANUAL-B001",
+                "productionDate": "2026-01-15",
+                "expiryDate": "",
+                "quantity": 4,
+                "unit": "个",
+                "locationName": "A-01",
+                "purchaseOrderNo": "",
+                "note": "",
+            },
+        )
+        self.assertEqual(inbound["orderNo"], "AUTO-RK-MANUAL-001")
+        self.assertEqual(inbound["status"], "completed")
+
+        outbound = service.create_manual_outbound(
+            self.connection,
+            self.project_user,
+            self.project_a["id"],
+            {
+                "orderNo": "AUTO-CK-MANUAL-001",
+                "orderDate": "2026-02-02",
+                "productCode": "AUTO-P001",
+                "qualityStatus": "良品",
+                "batchNo": "",
+                "productionDate": "",
+                "quantity": 2,
+                "unit": "个",
+                "locationName": "",
+                "recipient": "自动化收货方",
+                "note": "",
+            },
+        )
+        self.assertEqual(outbound["orderNo"], "AUTO-CK-MANUAL-001")
+        self.assertEqual(outbound["status"], "pending_picking")
+        inventory = service.list_inventory(
+            self.connection, self.project_user, self.project_a["id"]
+        )
+        self.assertEqual(inventory[0]["total_quantity"], 2)
+
+    def test_order_numbers_must_be_unique(self):
+        workbook = self.fixture.workbook("inbound", [{"quantity": 1}])
+        service.import_inbound(
+            self.connection, self.project_user, self.project_a["id"], workbook
+        )
+        with self.assertRaisesRegex(ValueError, "入库通知单号已存在"):
+            service.import_inbound(
+                self.connection, self.project_user, self.project_a["id"], workbook
+            )
+
+    def test_product_must_be_linked_to_project(self):
+        unlinked = service.create_product(
+            self.connection, self.admin, "AUTO-P003", "未关联商品", "50g", "个"
+        )
+        with self.assertRaises(service.ImportValidationError) as caught:
+            service.import_inbound(
+                self.connection,
+                self.project_user,
+                self.project_a["id"],
+                self.fixture.workbook("inbound", [{
+                    "product_code": "AUTO-P003",
+                    "unit": "个",
+                }]),
+            )
+        messages = [item["message"] for item in caught.exception.errors]
+        self.assertTrue(any("未添加到当前项目" in message for message in messages))
+
+    def test_summary_inventory_aggregates_by_product(self):
+        service.import_inbound(
+            self.connection,
+            self.project_user,
+            self.project_a["id"],
+            self.fixture.workbook("inbound", [
+                {"batch_no": "AUTO-B001", "quantity": 3},
+                {"batch_no": "AUTO-B002", "location_name": "A-01", "quantity": 4},
+            ]),
+        )
+        summary = service.list_inventory(
+            self.connection, self.project_user, self.project_a["id"], summary="1"
+        )
+        self.assertEqual(len(summary), 1)
+        self.assertEqual(summary[0]["product_id"], "AUTO-P001")
+        self.assertEqual(summary[0]["total_quantity"], 7)
+        self.assertEqual(summary[0]["available_quantity"], 7)
+        self.assertEqual(summary[0]["warehouse_name"], "自动化测试仓")
+
+    def test_outbound_specified_location_and_batch_constraints(self):
+        service.import_inbound(
+            self.connection,
+            self.project_user,
+            self.project_a["id"],
+            self.fixture.workbook("inbound", [
+                {"batch_no": "AUTO-B001", "production_date": "2026-01-01", "quantity": 2},
+                {"batch_no": "AUTO-B002", "production_date": "2026-01-02", "quantity": 3},
+            ]),
+        )
+        with self.assertRaises(service.ImportValidationError) as caught:
+            service.import_outbound(
+                self.connection,
+                self.project_user,
+                self.project_a["id"],
+                self.fixture.workbook("outbound", [{
+                    "quantity": 4,
+                    "batch_no": "AUTO-B001",
+                }]),
+            )
+        self.assertIn("当前可用库存为2件", caught.exception.errors[0]["message"])
+
+        outbound = service.import_outbound(
+            self.connection,
+            self.project_user,
+            self.project_a["id"],
+            self.fixture.workbook("outbound", [{
+                "quantity": 2,
+                "batch_no": "AUTO-B001",
+            }]),
+        )
+        picking = service.get_picking_order(
+            self.connection,
+            self.project_user,
+            self.project_a["id"],
+            outbound["pickingOrder"]["id"],
+        )
+        self.assertEqual(
+            [(item["batch_no"], item["quantity"]) for item in picking["items"]],
+            [("AUTO-B001", 2)],
+        )
+        self.assertEqual(picking["order"]["recipient"], "自动化收货方")
 
 
 class HttpAcceptanceTests(unittest.TestCase):
