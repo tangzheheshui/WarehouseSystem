@@ -15,7 +15,7 @@ Python 标准库 + SQLite + 原生 Web 前端实现，无第三方运行依赖�
 - 库存查询区分汇总（按货品编号）与明细（按货位）双视图，支持自定义显示/隐藏列。
 - 项目创建时绑定唯一仓库与库区；商品维护与项目授权独立，商品须添加到项目后方可作业。
 - 项目历史库存 CSV 一次性初始化导入。
-- 多公司同服务器 80 端口部署，访问地址为 `/公司标识/`。
+- 多公司同服务器部署，每家公司独立子域名：`<公司标识>.wms.tangzheheshui.cn`。
 
 需求见 [requirements.md](docs/requirements.md)（V2/V3/V4 合并，含事项列表与待确认清单）。
 
@@ -58,6 +58,8 @@ scripts/dev-preview.sh
 
 ## 部署
 
+公司放子域名前缀（SaaS 多租户惯例）：`acme.wms.tangzheheshui.cn`。DNSPod 添加泛解析：`*.wms` A 记录指向服务器 IP（再加一条 `wms` 做落地页）。
+
 第一家公司：
 
 ```bash
@@ -67,10 +69,10 @@ scripts/dev-preview.sh
 访问：
 
 ```text
-http://193.112.26.217/acme/
+https://acme.wms.tangzheheshui.cn/
 ```
 
-第二家公司自动选择内部端口，公网仍使用 80：
+第二家公司自动选择内部端口，证书按子域名自动签发，无需再动 DNS：
 
 ```bash
 ./deploy.sh beta 193.112.26.217 李四 lisi
@@ -79,7 +81,7 @@ http://193.112.26.217/acme/
 访问：
 
 ```text
-http://193.112.26.217/beta/
+https://beta.wms.tangzheheshui.cn/
 ```
 
 更多说明见 [deployment.md](docs/deployment.md) 和 [operation-manual.md](docs/operation-manual.md)。

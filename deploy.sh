@@ -11,8 +11,15 @@ Example:
 
 company-key must be lowercase English letters, numbers, or hyphens.
 admin-name and admin-username are required only for the first deployment.
+
+Each company is served at its own subdomain:
+  https://<company-key>.wms.tangzheheshui.cn
+Override the base domain with the WMS_DOMAIN environment variable.
+DNS needs a wildcard A record: *.wms -> <server-ip>.
 USAGE
 }
+
+WMS_DOMAIN=${WMS_DOMAIN:-wms.tangzheheshui.cn}
 
 if [ "${1:-}" = "-h" ] || [ "${1:-}" = "--help" ]; then
   usage
@@ -116,6 +123,7 @@ echo "==> Installing company instance"
 ssh "$SSH_TARGET" \
   "sudo env COMPANY_KEY='$COMPANY_KEY' REMOTE_DIR='$REMOTE_DIR' \
    SERVICE_NAME='$SERVICE_NAME' ENV_FILE='$ENV_FILE' APP_PORT='$APP_PORT' \
+   WMS_DOMAIN='$WMS_DOMAIN' \
    ADMIN_NAME='$ADMIN_NAME' ADMIN_USERNAME='$ADMIN_USERNAME' \
    ADMIN_PASSWORD='$ADMIN_PASSWORD' DB_EXISTS='$DB_EXISTS' sh -s" <<'REMOTE'
 set -eu
@@ -141,11 +149,17 @@ if [ ! -f "$ENV_FILE" ]; then
   cat > "$ENV_FILE" <<ENV
 WMS_COMPANY_KEY=$COMPANY_KEY
 WMS_APP_PORT=$APP_PORT
-WMS_BASE_PATH=/$COMPANY_KEY
+WMS_BASE_PATH=/
 WMS_ADMIN_NAME=$ADMIN_NAME
 WMS_ADMIN_USERNAME=$ADMIN_USERNAME
 WMS_ADMIN_PASSWORD=$ADMIN_PASSWORD
 ENV
+fi
+# 历史实例的 env 里可能是 /<company>，统一改成根路径（子域名部署）
+if grep -q '^WMS_BASE_PATH=' "$ENV_FILE"; then
+  sed -i 's|^WMS_BASE_PATH=.*|WMS_BASE_PATH=/|' "$ENV_FILE"
+else
+  printf '\nWMS_BASE_PATH=/\n' >> "$ENV_FILE"
 fi
 chown root:root "$ENV_FILE"
 chmod 600 "$ENV_FILE"
@@ -162,7 +176,7 @@ User=www-data
 Group=www-data
 WorkingDirectory=$REMOTE_DIR
 EnvironmentFile=$ENV_FILE
-ExecStart=/usr/bin/python3 $REMOTE_DIR/server/main.py --host 127.0.0.1 --port $APP_PORT --db $REMOTE_DIR/data/warehouse.db --base-path /$COMPANY_KEY
+ExecStart=/usr/bin/python3 $REMOTE_DIR/server/main.py --host 127.0.0.1 --port $APP_PORT --db $REMOTE_DIR/data/warehouse.db --base-path /
 Restart=always
 RestartSec=3
 NoNewPrivileges=true
@@ -174,37 +188,142 @@ ReadWritePaths=$REMOTE_DIR/data
 WantedBy=multi-user.target
 SERVICE
 
+# —— 旧路径路由：/acme/... 永久跳转到 acme.wms...（历史链接不断）——
 sudo mkdir -p /etc/nginx/wms-routes
 cat > "/etc/nginx/wms-routes/$COMPANY_KEY.conf" <<ROUTE
 location = /$COMPANY_KEY {
-    return 308 /$COMPANY_KEY/;
+    return 308 https://$COMPANY_KEY.$WMS_DOMAIN/;
 }
 
 location ^~ /$COMPANY_KEY/ {
-    proxy_pass http://127.0.0.1:$APP_PORT;
-    proxy_http_version 1.1;
-    proxy_set_header Host \$host;
-    proxy_set_header X-Real-IP \$remote_addr;
-    proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-    proxy_set_header X-Forwarded-Proto \$scheme;
+    rewrite ^/$COMPANY_KEY/(.*)\$ https://$COMPANY_KEY.$WMS_DOMAIN/\$1 permanent;
 }
 ROUTE
 
+# —— 共享站点：catch-all 只做 ACME 验证和旧路径跳转 ——
 cat > /etc/nginx/sites-available/wms <<NGINX
 server {
     listen 80 default_server;
+    listen [::]:80 default_server;
     server_name _;
     client_max_body_size 16m;
+    location /.well-known/acme-challenge/ { root /var/www/certbot; }
     include /etc/nginx/wms-routes/*.conf;
 }
 NGINX
 ln -sfn /etc/nginx/sites-available/wms /etc/nginx/sites-enabled/wms
 rm -f /etc/nginx/sites-enabled/default
+sudo mkdir -p /var/www/certbot
+
+# —— 落地页 $WMS_DOMAIN → 默认公司（当前部署的公司）；先 HTTP，证书就绪后升级 ——
+LANDING_CERT="/etc/letsencrypt/live/$WMS_DOMAIN"
+write_landing_http() {
+  cat > /etc/nginx/sites-available/wms-landing <<NGINX
+server {
+    listen 80;
+    listen [::]:80;
+    server_name $WMS_DOMAIN;
+    location /.well-known/acme-challenge/ { root /var/www/certbot; }
+    location / { return 308 https://$COMPANY_KEY.$WMS_DOMAIN/; }
+}
+NGINX
+}
+write_landing_https() {
+  cat > /etc/nginx/sites-available/wms-landing <<NGINX
+server {
+    listen 80;
+    listen [::]:80;
+    server_name $WMS_DOMAIN;
+    location /.well-known/acme-challenge/ { root /var/www/certbot; }
+    location / { return 308 https://$WMS_DOMAIN\$request_uri; }
+}
+
+server {
+    listen 443 ssl http2;
+    listen [::]:443 ssl http2;
+    server_name $WMS_DOMAIN;
+    ssl_certificate $LANDING_CERT/fullchain.pem;
+    ssl_certificate_key $LANDING_CERT/privkey.pem;
+    location / { return 308 https://$COMPANY_KEY.$WMS_DOMAIN/; }
+}
+NGINX
+}
+write_landing_http
+ln -sfn /etc/nginx/sites-available/wms-landing /etc/nginx/sites-enabled/wms-landing
+
+# —— 公司站点：先写 HTTP 版（ACME 验证 + 直接反代），证书就绪后升级为 HTTPS ——
+CERT_NAME="$COMPANY_KEY.$WMS_DOMAIN"
+CERT_DIR="/etc/letsencrypt/live/$CERT_NAME"
+cat > "/etc/nginx/sites-available/wms-$COMPANY_KEY" <<NGINX
+server {
+    listen 80;
+    listen [::]:80;
+    server_name $CERT_NAME;
+    client_max_body_size 16m;
+    location /.well-known/acme-challenge/ { root /var/www/certbot; }
+    location / {
+        proxy_pass http://127.0.0.1:$APP_PORT;
+        proxy_http_version 1.1;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+    }
+}
+NGINX
+ln -sfn "/etc/nginx/sites-available/wms-$COMPANY_KEY" "/etc/nginx/sites-enabled/wms-$COMPANY_KEY"
 
 nginx -t
 systemctl daemon-reload
 systemctl enable --now "$SERVICE_NAME"
 systemctl restart "$SERVICE_NAME"
+systemctl reload nginx
+
+# —— ACME 验证位已生效，现在签证书 ——
+if [ ! -f "$LANDING_CERT/fullchain.pem" ]; then
+  certbot certonly --webroot -w /var/www/certbot -d "$WMS_DOMAIN" \
+    --non-interactive --agree-tos >/dev/null 2>&1 || true
+fi
+if [ -f "$LANDING_CERT/fullchain.pem" ]; then
+  write_landing_https
+fi
+
+if [ ! -f "$CERT_DIR/fullchain.pem" ]; then
+  certbot certonly --webroot -w /var/www/certbot -d "$CERT_NAME" \
+    --non-interactive --agree-tos >/dev/null 2>&1 || true
+fi
+
+if [ -f "$CERT_DIR/fullchain.pem" ]; then
+  cat > "/etc/nginx/sites-available/wms-$COMPANY_KEY" <<NGINX
+server {
+    listen 80;
+    listen [::]:80;
+    server_name $CERT_NAME;
+    client_max_body_size 16m;
+    location /.well-known/acme-challenge/ { root /var/www/certbot; }
+    location / { return 308 https://\$host\$request_uri; }
+}
+
+server {
+    listen 443 ssl http2;
+    listen [::]:443 ssl http2;
+    server_name $CERT_NAME;
+    client_max_body_size 16m;
+    ssl_certificate $CERT_DIR/fullchain.pem;
+    ssl_certificate_key $CERT_DIR/privkey.pem;
+    location / {
+        proxy_pass http://127.0.0.1:$APP_PORT;
+        proxy_http_version 1.1;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+    }
+}
+NGINX
+fi
+
+nginx -t
 systemctl reload nginx
 REMOTE
 
@@ -214,7 +333,7 @@ ssh "$SSH_TARGET" \
 
 echo "==> Health check"
 ssh "$SSH_TARGET" \
-  "for i in 1 2 3 4 5 6 7 8 9 10; do curl -fsS 'http://127.0.0.1:$APP_PORT/$COMPANY_KEY/api/health' && exit 0; sleep 1; done; exit 1"
+  "for i in 1 2 3 4 5 6 7 8 9 10; do curl -fsS 'http://127.0.0.1:$APP_PORT/api/health' && exit 0; sleep 1; done; exit 1"
 echo
 
 if [ "$SHOW_PASSWORD" -eq 1 ]; then
@@ -224,4 +343,11 @@ if [ "$SHOW_PASSWORD" -eq 1 ]; then
   echo "Change the password immediately after first login."
 fi
 
-echo "==> Deployment complete: http://$REMOTE_HOST/$COMPANY_KEY/"
+if ssh "$SSH_TARGET" "sudo test -f '/etc/letsencrypt/live/$COMPANY_KEY.$WMS_DOMAIN/fullchain.pem'"; then
+  echo "==> Deployment complete: https://$COMPANY_KEY.$WMS_DOMAIN/"
+else
+  echo "==> Deployment complete (HTTP only): http://$COMPANY_KEY.$WMS_DOMAIN/"
+  echo "    HTTPS 未启用：$COMPANY_KEY.$WMS_DOMAIN 尚未解析到 $REMOTE_HOST。"
+  echo "    在 DNSPod 添加泛解析 A 记录：*.wms -> $REMOTE_HOST（再加一条 wms -> $REMOTE_HOST 做落地页），"
+  echo "    等解析生效后重跑本命令即可自动签发证书并切换 HTTPS。"
+fi
