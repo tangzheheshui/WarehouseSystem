@@ -18,7 +18,8 @@ class DirectHandler(Handler):
         self.server = SimpleNamespace(
             db_path=str(database_path), base_path="/acme"
         )
-        self.connection = db.connect(database_path)
+        self._setup_connection = db.connect(database_path)
+        self.connection = self._setup_connection
         normalized = self._normalize_path(path)
         if normalized is None:
             raise ValueError("invalid prefixed path")
@@ -47,8 +48,13 @@ class BasePathTests(unittest.TestCase):
 
     def request(self, method, path, body=None, headers=None):
         handler = DirectHandler(self.db_path, path, body, headers)
-        handler.handle_api(method)
-        return handler.json_status, handler.json_response
+        try:
+            handler.handle_api(method)
+            return handler.json_status, handler.json_response
+        finally:
+            # Windows 上未关闭的 sqlite 连接会锁住库文件，导致临时目录清理失败
+            handler._setup_connection.close()
+            handler.connection.close()
 
     def test_normalize_company_prefix(self):
         self.assertEqual(normalize_base_path(None), "/")

@@ -543,7 +543,8 @@ def _migrate_legacy(connection):
     connection.execute("PRAGMA foreign_keys = ON")
 
 
-def init_db(path=None):
+def init_db(path=None, admin_username=None, admin_display_name=None,
+            admin_password=None):
     connection = connect(path)
     try:
         user_columns = _columns(connection, "users")
@@ -583,10 +584,18 @@ def init_db(path=None):
                          json.dumps(columns, ensure_ascii=False)),
                     )
             if connection.execute("SELECT COUNT(*) FROM users").fetchone()[0] == 0:
-                username = os.environ.get("WMS_ADMIN_USERNAME", "admin")
-                display_name = os.environ.get("WMS_ADMIN_NAME", "管理员")
+                username = (
+                    admin_username or os.environ.get("WMS_ADMIN_USERNAME", "admin")
+                )
+                display_name = (
+                    admin_display_name
+                    or os.environ.get("WMS_ADMIN_NAME", "管理员")
+                )
                 contact_phone = os.environ.get("WMS_ADMIN_CONTACT_PHONE")
-                password = os.environ.get("WMS_ADMIN_PASSWORD", "Admin123456")
+                password = (
+                    admin_password
+                    or os.environ.get("WMS_ADMIN_PASSWORD", "Admin123456")
+                )
                 connection.execute(
                     """INSERT INTO users
                        (username, display_name, contact_phone, password_hash, role,

@@ -10,6 +10,7 @@ const INVENTORY_COLUMNS_KEY = `wmsInventoryColumns:${BASE_PATH}`;
 
 const state = {
   token: localStorage.getItem(TOKEN_KEY) || "",
+  branding: { systemName: "万顺WMS仓库管理系统", companyName: "" },
   user: null,
   projects: [],
   projectId: localStorage.getItem(PROJECT_KEY) || "",
@@ -46,6 +47,7 @@ const titles = {
   warehouses: "仓库信息",
   projects: "项目管理",
   users: "用户管理",
+  settings: "系统设置",
   templates: "模板管理",
   logs: "操作日志",
   password: "修改密码",
@@ -57,6 +59,7 @@ const adminPages = [
   { id: "warehouses", label: "仓库信息", group: "主数据", tone: "violet" },
   { id: "projects", label: "项目管理", group: "配置权限", tone: "teal" },
   { id: "users", label: "用户管理", group: "配置权限", tone: "teal" },
+  { id: "settings", label: "系统设置", group: "配置权限", tone: "slate" },
 ];
 
 const projectPages = [
@@ -164,6 +167,20 @@ function clearSession() {
   state.projectId = "";
   localStorage.removeItem(TOKEN_KEY);
   localStorage.removeItem(PROJECT_KEY);
+}
+
+function applyBranding() {
+  const node = document.getElementById("loginCompanyName");
+  const name = (state.branding.companyName || "").trim();
+  node.textContent = name;
+  node.classList.toggle("hidden", !name);
+}
+
+async function loadBranding() {
+  try {
+    state.branding = await api("branding");
+    applyBranding();
+  } catch (_) {}
 }
 
 function allowedPages() {
@@ -1688,6 +1705,35 @@ function actionLabel(value) {
   return labels[value] || value;
 }
 
+function renderSettings() {
+  document.getElementById("page").innerHTML = `
+    <div class="panel" style="max-width:520px">
+      <h3>系统设置</h3>
+      <form id="settingsForm" class="fields">
+        <label>公司名称<input name="companyName" maxlength="50" required
+          value="${esc(state.branding.companyName || "")}"></label>
+        <p class="form-hint">公司名称显示在登录页系统名称下方，仅公司管理员可修改。</p>
+        <button class="btn primary" type="submit">保存</button>
+        <p id="settingsError" class="form-error"></p>
+      </form>
+    </div>`;
+  document.getElementById("settingsForm").onsubmit = async event => {
+    event.preventDefault();
+    const data = Object.fromEntries(new FormData(event.target));
+    const errorNode = document.getElementById("settingsError");
+    errorNode.textContent = "";
+    try {
+      await api("company-name", {
+        method: "PUT",
+        body: { companyName: data.companyName.trim() },
+      });
+      state.branding.companyName = data.companyName.trim();
+      applyBranding();
+      toast("公司名称已更新");
+    } catch (error) { errorNode.textContent = error.message; }
+  };
+}
+
 function renderPassword() {
   document.getElementById("page").innerHTML = `
     <div class="panel" style="max-width:520px">
@@ -1734,6 +1780,7 @@ async function renderPage() {
       else if (page === "warehouses") await renderWarehouses();
       else if (page === "projects") await renderProjects();
       else if (page === "users") await renderUsers();
+      else if (page === "settings") renderSettings();
       else if (page === "password") renderPassword();
       else location.hash = "#dashboard";
       return;
@@ -1796,6 +1843,7 @@ window.addEventListener("hashchange", () => {
 });
 
 (async function initialize() {
+  loadBranding();
   if (!state.token) {
     document.getElementById("loginView").classList.remove("hidden");
     return;

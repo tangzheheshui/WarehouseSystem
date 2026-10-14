@@ -9,12 +9,15 @@ from urllib.parse import parse_qs, unquote, urlparse
 
 import auth
 import db
+import platform_registry
 import service
 from security import iso_now
 
 
 STATIC_ROOT = Path(__file__).resolve().parent.parent / "static"
 TOKEN_PATTERN = re.compile(r"^Bearer\s+(.+)$", re.I)
+SYSTEM_NAME = "万顺WMS仓库管理系统"
+COMPANY_NAME_MAX_LENGTH = platform_registry.MAX_COMPANY_NAME_LENGTH
 
 
 def normalize_base_path(value):
@@ -31,9 +34,12 @@ def normalize_base_path(value):
 
 
 class WarehouseServer(ThreadingHTTPServer):
-    def __init__(self, address, handler, database_path, base_path="/"):
+    def __init__(self, address, handler, database_path, base_path="/",
+                 registry=None, domain=None):
         self.db_path = str(database_path)
         self.base_path = normalize_base_path(base_path)
+        self.registry = registry
+        self.domain = (domain or "").strip().lower().lstrip(".") or None
         super().__init__(address, handler)
 
 
@@ -74,7 +80,19 @@ class Handler(BaseHTTPRequestHandler):
         if self.path is None:
             self.send_json({"error": "路径无效"}, 404)
             return
+        self.raw_body = self._drain_body()
         try:
+            if self.server.registry is not None:
+                if not self._resolve_platform_request():
+                    return
+                if self.console_mode:
+                    if self.path.startswith("/api/"):
+                        self.handle_console_api(method)
+                    elif method == "GET":
+                        self.handle_console_static()
+                    else:
+                        self.send_json({"error": "方法不允许"}, 405)
+                    return
             if self.path.startswith("/api/"):
                 self.handle_api(method)
             elif method == "GET":
@@ -83,17 +101,227 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json({"error": "方法不允许"}, 405)
         except (BrokenPipeError, ConnectionResetError):
             pass
+        except ValueError as exc:
+            try:
+                self.send_json({"error": str(exc)}, 400)
+            except Exception:
+                pass
         except Exception as exc:
             try:
                 self.send_json({"error": str(exc)}, 500)
             except Exception:
                 pass
 
-    def read_body(self, limit=1024 * 1024):
-        length = int(self.headers.get("Content-Length", "0"))
-        if length > limit:
+    BODY_DRAIN_LIMIT = service.MAX_HISTORY_FILE_SIZE + 1024 * 1024
+
+    def _drain_body(self):
+        """一次性读完请求体：HTTP/1.1 长连接上未读 body 会被误当成
+        下一条请求解析，必须在响应前消费掉。"""
+        try:
+            length = int(self.headers.get("Content-Length", "0") or 0)
+        except ValueError:
+            length = 0
+        if length <= 0:
+            return b""
+        if length > self.BODY_DRAIN_LIMIT:
+            remaining = length
+            while remaining > 0:
+                chunk = self.rfile.read(min(65536, remaining))
+                if not chunk:
+                    break
+                remaining -= len(chunk)
             raise ValueError("请求体过大")
         return self.rfile.read(length)
+
+    # ---- V5 平台层：按 Host 分发公司数据库或进入控制台 ----
+
+    def request_host(self):
+        host = (
+            self.headers.get("X-Forwarded-Host", "")
+            or self.headers.get("Host", "")
+        )
+        return host.split(",")[0].strip().lower().partition(":")[0]
+
+    def _resolve_platform_request(self):
+        """每请求解析 Host：console 前缀进控制台，公司前缀选库。
+
+        返回 False 表示已直接回包（公司不存在/已停用），终止后续分发。
+        """
+        self.console_mode = False
+        self.company = None
+        self.db_path_override = None
+
+        host = self.request_host()
+        domain = self.server.domain
+        prefix = None
+        if domain:
+            if host == f"console.{domain}":
+                self.console_mode = True
+                return True
+            if host.endswith(f".{domain}"):
+                label = host[: -len(domain) - 1]
+                if label and "." not in label:
+                    prefix = label
+        if prefix is None and "." in host:
+            prefix = host.partition(".")[0]
+
+        company = self.server.registry.get_company(prefix or "")
+        if not company:
+            self.send_platform_page(
+                "公司不存在，请使用公司子域名访问系统", 404
+            )
+            return False
+        if company["status"] != "active":
+            self.send_platform_page(
+                f"公司「{company['name']}」已停用，请联系万顺平台管理员", 403
+            )
+            return False
+        self.company = company
+        self.db_path_override = company["db_path"]
+        return True
+
+    def send_platform_page(self, message, status):
+        if self.path.startswith("/api/"):
+            self.send_json({"error": message}, status)
+            return
+        body = f"""<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8">
+<title>{SYSTEM_NAME}</title><link rel="stylesheet" href="/styles.css">
+</head><body><div class="platform-notice"><h1>{SYSTEM_NAME}</h1>
+<p>{message}</p></div></body></html>"""
+        data = body.encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(data)
+
+    def request_db_path(self):
+        return getattr(self, "db_path_override", None) or self.server.db_path
+
+    def console_admin(self, registry):
+        """控制台鉴权：返回管理员信息；须改密时限制可用接口。"""
+        admin = registry.admin_for_token(self.token())
+        if not admin:
+            self.send_json({"error": "请先登录控制台"}, 401)
+            return None
+        if admin.get("must_change_password") and self.path not in (
+            "/api/console/me", "/api/console/change-password",
+            "/api/console/logout",
+        ):
+            self.send_json(
+                {"error": "请先修改初始密码", "mustChangePassword": True}, 403
+            )
+            return None
+        return admin
+
+    def handle_console_api(self, method):
+        registry = self.server.registry
+        try:
+            if method == "GET" and self.path == "/api/console/health":
+                self.send_json({
+                    "status": "ok",
+                    "time": iso_now(),
+                    "mode": "console",
+                    "domain": self.server.domain,
+                })
+                return
+
+            if method == "POST" and self.path == "/api/console/login":
+                body = self.read_json()
+                token, admin = registry.admin_login(
+                    body.get("username"), body.get("password")
+                )
+                self.send_json({"token": token, "user": admin})
+                return
+
+            if not str(self.path).startswith("/api/console/"):
+                self.send_json({"error": "接口不存在"}, 404)
+                return
+
+            admin = self.console_admin(registry)
+            if not admin:
+                return
+
+            if method == "GET" and self.path == "/api/console/me":
+                self.send_json({
+                    "username": admin["username"],
+                    "displayName": admin["display_name"],
+                    "mustChangePassword": bool(admin.get("must_change_password")),
+                    "domain": self.server.domain,
+                })
+                return
+
+            if method == "POST" and self.path == "/api/console/logout":
+                registry.admin_logout(self.token())
+                self.send_json({"ok": True})
+                return
+
+            if method == "POST" and self.path == "/api/console/change-password":
+                body = self.read_json()
+                registry.admin_change_password(
+                    self.token(), body.get("oldPassword"),
+                    body.get("newPassword"),
+                )
+                self.send_json({"ok": True})
+                return
+
+            if method == "GET" and self.path == "/api/console/companies":
+                self.send_json([
+                    platform_registry.public_company(row)
+                    for row in registry.companies()
+                ])
+                return
+
+            if method == "POST" and self.path == "/api/console/companies":
+                body = self.read_json()
+                record, password = registry.create_company(
+                    body.get("prefix"), body.get("name"),
+                    body.get("adminUsername"), body.get("adminDisplayName"),
+                    body.get("password"),
+                )
+                result = platform_registry.public_company(record)
+                result["initialPassword"] = password
+                result["subdomain"] = (
+                    f"{record['prefix']}.{self.server.domain}"
+                    if self.server.domain else record["prefix"]
+                )
+                self.send_json(result, 201)
+                return
+
+            match = re.fullmatch(
+                r"/api/console/companies/([a-z0-9-]+)/status", self.path
+            )
+            if match and method == "POST":
+                body = self.read_json()
+                row = registry.set_company_status(
+                    match.group(1), body.get("status")
+                )
+                self.send_json(platform_registry.public_company(row))
+                return
+
+            match = re.fullmatch(
+                r"/api/console/companies/([a-z0-9-]+)/reset-admin-password",
+                self.path,
+            )
+            if match and method == "POST":
+                password = registry.reset_company_admin_password(
+                    match.group(1)
+                )
+                self.send_json({"password": password})
+                return
+
+            self.send_json({"error": "接口不存在"}, 404)
+        except platform_registry.PlatformError as exc:
+            self.send_json({"error": str(exc)}, 400)
+        except ValueError as exc:
+            self.send_json({"error": str(exc)}, 400)
+
+    def read_body(self, limit=1024 * 1024):
+        if len(self.raw_body) > limit:
+            raise ValueError("请求体过大")
+        return self.raw_body
 
     def read_json(self):
         try:
@@ -180,7 +408,7 @@ class Handler(BaseHTTPRequestHandler):
         return query
 
     def handle_api(self, method):
-        connection = db.connect(self.server.db_path)
+        connection = db.connect(self.request_db_path())
         self.connection = connection
         try:
             if method == "POST" and self.path == "/api/login":
@@ -196,6 +424,21 @@ class Handler(BaseHTTPRequestHandler):
                     "status": "ok",
                     "time": iso_now(),
                     "basePath": self.server.base_path,
+                })
+                return
+
+            if method == "GET" and self.path == "/api/branding":
+                company = getattr(self, "company", None)
+                if company:
+                    name = company["name"]
+                else:
+                    row = connection.execute(
+                        "SELECT value FROM meta WHERE key = 'company_name'"
+                    ).fetchone()
+                    name = row["value"] if row else ""
+                self.send_json({
+                    "systemName": SYSTEM_NAME,
+                    "companyName": name,
                 })
                 return
 
@@ -240,6 +483,31 @@ class Handler(BaseHTTPRequestHandler):
             connection.close()
 
     def handle_protected_api(self, connection, method):
+        if method == "PUT" and self.path == "/api/company-name":
+            user = self.require_admin(connection)
+            if not user:
+                return
+            body = self.read_json()
+            name = str(body.get("companyName") or "").strip()
+            if not name or len(name) > COMPANY_NAME_MAX_LENGTH:
+                raise ValueError(
+                    f"公司名称必填且不超过{COMPANY_NAME_MAX_LENGTH}字"
+                )
+            company = getattr(self, "company", None)
+            if company:
+                self.server.registry.rename_company(company["prefix"], name)
+            else:
+                connection.execute(
+                    """INSERT INTO meta(key, value) VALUES ('company_name', ?)
+                       ON CONFLICT(key) DO UPDATE SET value = excluded.value""",
+                    (name,),
+                )
+            service.audit(connection, user, "company.rename",
+                          f"修改公司名称为 {name}")
+            connection.commit()
+            self.send_json({"ok": True})
+            return
+
         if method == "GET" and self.path == "/api/dashboard":
             user = self.require_user(connection)
             if not user:
@@ -709,16 +977,16 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
-    def handle_static(self):
+    def handle_static(self, default="index.html"):
         if self.path == "/":
-            path = STATIC_ROOT / "index.html"
+            path = STATIC_ROOT / default
         else:
             path = (STATIC_ROOT / self.path.lstrip("/")).resolve()
             if not str(path).startswith(str(STATIC_ROOT.resolve())):
                 self.send_json({"error": "路径无效"}, 403)
                 return
             if not path.exists() and path.suffix not in (".css", ".js", ".ico"):
-                path = STATIC_ROOT / "index.html"
+                path = STATIC_ROOT / default
         if not path.exists() or not path.is_file():
             self.send_json({"error": "文件不存在"}, 404)
             return
@@ -733,9 +1001,19 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
+    def handle_console_static(self):
+        self.handle_static(default="console.html")
 
-def create_server(host, port, database_path, base_path="/"):
-    db.init_db(database_path)
+
+def create_server(host, port, database_path, base_path="/", registry=None,
+                  domain=None):
+    if registry is not None:
+        generated = registry.ensure_platform_admin()
+        if generated:
+            print("平台管理员初始密码（仅本次显示，请立即保存）：", generated)
+    else:
+        db.init_db(database_path)
     return WarehouseServer(
-        (host, port), Handler, database_path, base_path=base_path
+        (host, port), Handler, database_path, base_path=base_path,
+        registry=registry, domain=domain,
     )

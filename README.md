@@ -16,8 +16,10 @@ Python 标准库 + SQLite + 原生 Web 前端实现，无第三方运行依赖�
 - 项目创建时绑定唯一仓库与库区；商品维护与项目授权独立，商品须添加到项目后方可作业。
 - 项目历史库存 CSV 一次性初始化导入。
 - 多公司同服务器部署，每家公司独立子域名：`<公司标识>.wms.tangzheheshui.cn`。
+- 万顺控制台（V5）：平台管理员在 `console.wms.tangzheheshui.cn` 创建公司（一次性初始密码）、停用/启用公司、应急重置公司管理员密码；单进程按 Host 分发，每家公司仍是独立 SQLite 库。
+- 品牌（V5）：登录页与浏览器标题显示「万顺WMS仓库管理系统」，第二行显示本公司名称；公司管理员可在系统设置里修改公司名称。
 
-需求见 [requirements.md](docs/requirements.md)（V2/V3/V4 合并，含事项列表与待确认清单）。
+需求见 [requirements.md](docs/requirements.md)（V2/V3/V4/V5 合并，含事项列表与待确认清单）。
 
 ## 本地运行
 
@@ -38,6 +40,19 @@ Python 标准库 + SQLite + 原生 Web 前端实现，无第三方运行依赖�
 WMS_ADMIN_NAME=张三 WMS_ADMIN_USERNAME=zhangsan WMS_ADMIN_PASSWORD='初始密码' ./run.sh
 ```
 
+### 平台模式（多公司 + 万顺控制台）
+
+```bash
+WMS_PLATFORM_ADMIN_USERNAME=wanshun WMS_PLATFORM_ADMIN_PASSWORD='初始密码' \
+  python3 server/main.py --platform --domain wms.test
+```
+
+- 控制台：<http://console.wms.test/>（本机联调可改 hosts 指向 127.0.0.1）
+- 公司子域名：`<公司前缀>.wms.test`，在控制台创建公司后立即可访问
+- 未设置平台管理员密码时首启生成随机密码并仅打印一次
+
+生产部署（泛域名证书、nginx、systemd）见 [deployment.md](docs/deployment.md) 的「V5 平台模式」章节。
+
 ### 固定假数据预览
 
 ```bash
@@ -52,7 +67,7 @@ scripts/dev-preview.sh
 ./tests/scripts/run.sh
 ```
 
-覆盖 Excel 读写、登录锁定、权限、项目隔离、导入校验、出入库、到期日计算、历史 CSV、V1 迁移和访问前缀。测试使用临时数据库，自动创建测试账号，不依赖生产环境或 `acme`。
+覆盖 Excel 读写、登录锁定、权限、项目隔离、导入校验、出入库、到期日计算、历史 CSV、V1 迁移、访问前缀，以及 V5 多公司 Host 分发、控制台鉴权与公司创建/停启用/管理员重置全流程。测试使用临时数据库，自动创建测试账号，不依赖生产环境或 `acme`。
 
 测试说明和详细用例见 [tests/README.md](tests/README.md)、[test-cases.md](tests/cases/test-cases.md)。
 

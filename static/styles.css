@@ -835,3 +835,41 @@ table.data-table tbody tr:hover { background: #edf4fb; }
   }
   @page { size: A4; margin: 12mm; }
 }
+
+/* ---- V5 品牌与平台层 ---- */
+.login-company {
+  margin: 6px 0 0;
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 650;
+  letter-spacing: .02em;
+}
+.form-hint { margin: 0; color: var(--muted); font-size: 12px; }
+.platform-notice {
+  max-width: 460px;
+  margin: 12vh auto;
+  padding: 28px 30px;
+  background: #fff;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  text-align: center;
+}
+.platform-notice h1 { margin: 0 0 10px; font-size: 20px; }
+.platform-notice p { margin: 0; color: var(--muted); }
+.secret-box {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 14px;
+  border: 1px dashed var(--warning);
+  background: #fdf8ef;
+  border-radius: 6px;
+}
+.secret-box code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 16px;
+  font-weight: 700;
+  letter-spacing: .06em;
+}
+.secret-box .btn { margin-left: auto; }
+.console-sub { color: #9eaeba; font-size: 12px; }

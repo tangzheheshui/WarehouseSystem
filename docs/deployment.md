@@ -61,6 +61,54 @@ https://beta.wms.tangzheheshui.cn/
 
 `wms.tangzheheshui.cn` 落地页始终跳转到最近部署的公司。
 
+## V5 平台模式（单进程多公司）
+
+**已于 2026-10-14 首次部署上线**，实际形态：
+
+| 组件 | 状态 |
+| --- | --- |
+| `wms-platform` systemd 服务 | `/opt/wms-platform`，监听 `127.0.0.1:8010`（8000 留给旧 wms-acme 回滚期） |
+| 控制台 | `https://console.wms.tangzheheshui.cn/`，单域名证书（certbot HTTP-01，webroot `/var/www/certbot`），nginx 配置 `/etc/nginx/sites-available/wms-platform` |
+| 新公司子域名 | 80 端口经 `*.wms` 通配 server 块反代 8010，建公司立即可用（HTTP）；**HTTPS 需泛域名证书（待 DNSPod API Token，ACTION-10/11）** |
+| acme 公司 | 已迁移：数据在 `/opt/wms-platform/data/companies/acme/warehouse.db`，原库未动；nginx 仍用原 acme 证书，反代已切 8010；旧 `wms-acme` 服务已 stop + disable（回滚开关） |
+| 公司注册表 | `/opt/wms-platform/data/platform.json`（进程外修改即时生效） |
+
+日常升级：
+
+```bash
+./deploy-platform.sh          # 上传代码 → 服务器跑全量测试 → 重启 → 验证
+```
+
+回滚 acme（应急）：`sudo sed -i 's|:8010|:8000|' /etc/nginx/sites-available/wms-acme && sudo nginx -s reload && sudo systemctl enable --now wms-acme`，并把 `data/companies/acme/warehouse.db` 换回原库时间点。
+
+### 待办：泛域名证书（ACTION-10/11）
+
+1. 万顺在 DNSPod 创建 API Token（仅授予 `tangzheheshui.cn` DNS 权限）；
+2. 服务器用 acme.sh DNS-01 签 `*.wms.tangzheheshui.cn`（SAN 含裸域与 console）；
+3. `wms-platform` 的 443 server 块换用泛域名证书，并为 `*.wms` 增加 443 入口 + 80 跳 443；续期由 acme.sh 定时任务处理。
+
+### 首次部署参考（已执行，留档）
+
+```ini
+# /etc/systemd/system/wms-platform.service
+[Unit]
+Description=Wanshun WMS multi-company platform (V5)
+After=network.target
+
+[Service]
+User=ubuntu
+WorkingDirectory=/opt/wms-platform
+EnvironmentFile=/opt/wms-platform/data/platform.env   # 600，平台管理员账号
+ExecStart=/usr/bin/python3 server/main.py --platform --host 127.0.0.1 --port 8010 --domain wms.tangzheheshui.cn --platform-data /opt/wms-platform/data
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
+```
+
+之后新增公司在 `https://console.wms.tangzheheshui.cn` 完成：填公司前缀、公司名称、公司管理员姓名全拼，保存后一次性显示初始密码，新公司子域名立即可访问。deploy.sh 保留为首装与应急工具。
+
 ## 升级
 
 在原目录重新执行原部署命令即可。已有数据库会先自动备份，再升级代码并重启。

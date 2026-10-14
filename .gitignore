@@ -8,3 +8,5 @@ data/*.db-*
 .venv/
 venv/
 .preview/
+data/platform.json
+data/companies/

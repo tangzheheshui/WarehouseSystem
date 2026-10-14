@@ -2,9 +2,11 @@
 
 | 项目 | 内容 |
 | --- | --- |
-| 状态 | 方案已确认，待开发 |
+| 状态 | 已上线（2026-10-14 应用层实现并部署；泛域名证书待 DNSPod Token） |
 | 日期 | 2026-10-14 |
 | 关联 | 需求见 [requirements.md](requirements.md) §1、§2.4、§10 |
+
+> 实现说明：`server/platform_registry.py`（公司注册表 + 控制台账号）、`server/app.py`（按 Host 分发与控制台路由）、`static/console.html|js`（控制台前端）；启动方式 `python server/main.py --platform --domain wms.tangzheheshui.cn`。自动化验收见 `tests/cases/test_platform.py`（PLT-01～16）。
 
 ## 1. 目标
 
