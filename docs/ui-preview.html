@@ -1,0 +1,323 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>风格预览 — 万顺WMS</title>
+<style>
+/* ============ 变体令牌 ============ */
+body[data-variant="a"] {
+  /* A · 干净企业风（飞书 / AntD） */
+  --bg: #f5f6f8; --panel: #fff; --soft: #f7f8fa;
+  --line: #e4e7ec; --line-2: #cfd6de; --row-line: #eceef1;
+  --text: #1f2329; --text-2: #4e5561; --muted: #8a919f;
+  --accent: #2b5fa8; --accent-dark: #24507e; --accent-soft: #eef4fb;
+  --success: #16865a; --success-soft: #e6f4ee;
+  --warn: #96600f; --warn-soft: #faf3e2;
+  --danger: #bf3b34; --danger-soft: #fbeceb;
+  --side: #16233a; --side-text: #aab7c9; --side-act: rgba(255,255,255,.12);
+  --r-s: 6px; --r-m: 8px; --r-l: 10px;
+  --h: 32px; --h-s: 28px;
+  --shadow: 0 1px 2px rgba(16,24,40,.04);
+  --radius-avatar: 8px;
+  --gap-page: 16px; --pad-panel: 16px; --cell-y: 8px;
+}
+body[data-variant="b"] {
+  /* B · 轻盈极简风（Linear / Vercel） */
+  --bg: #fafafa; --panel: #fff; --soft: #f6f6f7;
+  --line: #ebebee; --line-2: #e0e0e3; --row-line: #f0f0f2;
+  --text: #17171c; --text-2: #55555e; --muted: #9b9ba4;
+  --accent: #5148e6; --accent-dark: #4038c7; --accent-soft: #eeedfd;
+  --success: #12946b; --success-soft: #e7f6f0;
+  --warn: #a06514; --warn-soft: #faf3e4;
+  --danger: #d5382f; --danger-soft: #fdeeed;
+  --side: #ffffff; --side-text: #6b6b76; --side-act: #f0f0f2;
+  --r-s: 8px; --r-m: 10px; --r-l: 14px;
+  --h: 34px; --h-s: 30px;
+  --shadow: 0 1px 3px rgba(20,20,25,.05), 0 6px 24px rgba(20,20,25,.04);
+  --radius-avatar: 10px;
+  --gap-page: 20px; --pad-panel: 20px; --cell-y: 10px;
+}
+body[data-variant="c"] {
+  /* C · 高密度专业风（金融终端 / 精修表格） */
+  --bg: #eef0f3; --panel: #fff; --soft: #f4f6f8;
+  --line: #dfe3e8; --line-2: #c9d0d9; --row-line: #e8ebef;
+  --text: #1a2129; --text-2: #454e59; --muted: #7d8794;
+  --accent: #0e7d6c; --accent-dark: #0a6557; --accent-soft: #e5f3f0;
+  --success: #0e7d6c; --success-soft: #e5f3f0;
+  --warn: #94610c; --warn-soft: #faf3e1;
+  --danger: #b03a30; --danger-soft: #fbecea;
+  --side: #101820; --side-text: #8d9aa8; --side-act: rgba(78,140,184,.22);
+  --r-s: 3px; --r-m: 4px; --r-l: 6px;
+  --h: 28px; --h-s: 24px;
+  --shadow: none;
+  --radius-avatar: 4px;
+  --gap-page: 12px; --pad-panel: 12px; --cell-y: 5px;
+}
+
+* { box-sizing: border-box; }
+body {
+  margin: 0; color: var(--text); background: var(--bg);
+  font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+  transition: background .2s ease;
+}
+button, input { font: inherit; }
+
+/* ============ 风格切换条 ============ */
+.picker {
+  position: sticky; top: 0; z-index: 99;
+  display: flex; align-items: center; gap: 10px;
+  padding: 10px 16px;
+  background: #101828; color: #fff;
+  box-shadow: 0 2px 12px rgba(0,0,0,.25);
+}
+.picker strong { font-size: 13px; margin-right: 6px; }
+.picker button {
+  display: inline-flex; align-items: center; gap: 7px;
+  padding: 7px 14px; border-radius: 8px;
+  border: 1px solid rgba(255,255,255,.16);
+  background: rgba(255,255,255,.06); color: #cdd5df;
+  font-size: 13px; cursor: pointer;
+}
+.picker button .dot { width: 10px; height: 10px; border-radius: 3px; }
+.picker button.on { background: #fff; color: #101828; border-color: #fff; font-weight: 600; }
+.picker .tip { margin-left: auto; font-size: 12px; color: #8b95a5; }
+
+/* ============ 布局 ============ */
+.app { display: grid; grid-template-columns: 208px minmax(0,1fr); min-height: calc(100vh - 53px); }
+.sidebar {
+  display: flex; flex-direction: column;
+  padding: 16px 10px 12px;
+  color: var(--side-text); background: var(--side);
+  border-right: 1px solid var(--line);
+}
+.brand { display: flex; align-items: center; gap: 10px; padding: 0 4px 14px; border-bottom: 1px solid var(--line); }
+.brand .mark {
+  display: grid; place-items: center; width: 32px; height: 32px;
+  background: var(--accent); color: #fff; border-radius: var(--radius-avatar);
+  font-weight: 700; font-size: 15px;
+}
+body[data-variant="b"] .brand .mark { color: #fff; }
+.brand strong { font-size: 14.5px; font-weight: 600; }
+body[data-variant="b"] .brand strong { color: var(--text); }
+body[data-variant="b"] .brand { border-color: var(--line); }
+body[data-variant="a"] .brand, body[data-variant="c"] .brand { border-color: rgba(255,255,255,.08); }
+.brand small { display: block; font-size: 11px; font-weight: 400; opacity: .65; }
+.nav { flex: 1; margin-top: 14px; display: grid; gap: 2px; align-content: start; }
+.nav-title { margin: 0 0 4px 8px; font-size: 11px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; opacity: .55; }
+.nav button {
+  display: flex; align-items: center; gap: 9px; width: 100%;
+  min-height: 32px; padding: 5px 8px;
+  border: 0; border-radius: var(--r-s); background: transparent;
+  color: inherit; font-size: 13px; text-align: left; cursor: pointer;
+}
+.nav button:hover { background: rgba(127,127,127,.12); }
+.nav button.on { background: var(--side-act); color: var(--text); font-weight: 500; }
+body[data-variant="a"] .nav button.on, body[data-variant="c"] .nav button.on { color: #fff; }
+body[data-variant="b"] .nav button.on { color: var(--accent); background: var(--accent-soft); }
+.nav .dot { width: 5px; height: 5px; border-radius: 50%; background: currentColor; opacity: .8; }
+.side-user {
+  display: flex; align-items: center; gap: 8px;
+  padding: 12px 6px 0; border-top: 1px solid var(--line);
+}
+body[data-variant="a"] .side-user, body[data-variant="c"] .side-user { border-color: rgba(255,255,255,.08); }
+.avatar {
+  display: grid; place-items: center; width: 30px; height: 30px; border-radius: 50%;
+  background: rgba(127,127,127,.18); font-size: 12px; font-weight: 600;
+}
+body[data-variant="a"] .avatar, body[data-variant="c"] .avatar { color: #fff; }
+body[data-variant="b"] .avatar { color: var(--text-2); }
+.side-user div { line-height: 1.25; min-width: 0; }
+.side-user strong { display: block; font-size: 12.5px; font-weight: 600; color: var(--text); }
+body[data-variant="a"] .side-user strong, body[data-variant="c"] .side-user strong { color: #fff; }
+.side-user span { font-size: 11px; opacity: .65; }
+
+main { min-width: 0; }
+.topbar {
+  min-height: 52px; padding: 0 24px;
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  background: var(--panel); border-bottom: 1px solid var(--line);
+}
+.topbar h2 { margin: 0; font-size: 17px; font-weight: 650; }
+.top-actions { display: flex; gap: 8px; }
+.page { padding: 20px 24px 40px; display: grid; gap: var(--gap-page); align-content: start; }
+
+.panel {
+  background: var(--panel); border: 1px solid var(--line);
+  border-radius: var(--r-m); box-shadow: var(--shadow);
+  padding: var(--pad-panel);
+}
+.panel h3 { margin: 0 0 12px; font-size: 15px; font-weight: 650; }
+.metrics { display: grid; grid-template-columns: repeat(5, 1fr); gap: 12px; }
+.metric {
+  padding: 12px 14px; min-height: 78px;
+  background: var(--panel); border: 1px solid var(--line);
+  border-radius: var(--r-m); box-shadow: var(--shadow);
+}
+.metric span { font-size: 12px; color: var(--muted); }
+.metric strong { display: block; margin-top: 6px; font-size: 22px; font-weight: 650; font-variant-numeric: tabular-nums; }
+.metric.t1 strong { color: var(--accent); } .metric.t2 strong { color: var(--success); }
+.metric.t3 strong { color: var(--warn); } .metric.t4 strong { color: var(--danger); }
+
+/* ============ 控件 ============ */
+.bar { display: flex; align-items: flex-end; gap: 10px; flex-wrap: wrap; }
+.bar label { display: grid; gap: 4px; font-size: 12px; color: var(--text-2); }
+input, select {
+  min-height: var(--h); padding: 5px 10px; font-size: 13px;
+  color: var(--text); background: var(--panel);
+  border: 1px solid var(--line-2); border-radius: var(--r-s); outline: none;
+}
+input:focus, select:focus { border-color: var(--accent); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 16%, transparent); }
+.btn {
+  display: inline-flex; align-items: center; justify-content: center;
+  min-height: var(--h); padding: 0 14px;
+  border: 1px solid var(--line-2); border-radius: var(--r-s);
+  background: var(--panel); color: var(--text);
+  font-size: 13px; font-weight: 500; cursor: pointer; white-space: nowrap;
+}
+.btn:hover { background: var(--soft); }
+.btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+.btn.primary:hover { background: var(--accent-dark); }
+.btn.sm { min-height: var(--h-s); padding: 0 10px; font-size: 12px; }
+.btn.text { border-color: transparent; background: transparent; color: var(--accent); padding: 0 8px; }
+.btn.text:hover { background: var(--accent-soft); }
+
+/* ============ 表格 ============ */
+.tablewrap { border: 1px solid var(--line); border-radius: var(--r-m); overflow: hidden; margin-top: 14px; }
+table { width: 100%; border-collapse: collapse; font-size: 13px; }
+th, td { padding: var(--cell-y) 10px; text-align: left; border-bottom: 1px solid var(--row-line); }
+th { font-size: 12px; font-weight: 600; color: var(--text-2); background: var(--soft); white-space: nowrap; }
+body[data-variant="c"] th, body[data-variant="c"] td { border-right: 1px solid var(--row-line); }
+body[data-variant="c"] th:last-child, body[data-variant="c"] td:last-child { border-right: 0; }
+body[data-variant="c"] tbody tr:last-child td { border-bottom: 0; }
+tbody tr:hover { background: color-mix(in srgb, var(--accent) 4%, var(--panel)); }
+td.num { text-align: right; font-variant-numeric: tabular-nums; }
+td .name { font-weight: 550; }
+td .sub { display: block; margin-top: 1px; font-size: 11px; color: var(--muted); }
+.qty { font-size: 14px; font-weight: 650; color: var(--accent); font-variant-numeric: tabular-nums; }
+.badge { display: inline-block; padding: 1px 8px; border-radius: 999px; font-size: 12px; font-weight: 500; }
+.badge.w { color: var(--warn); background: var(--warn-soft); }
+.badge.s { color: var(--success); background: var(--success-soft); }
+.badge.d { color: var(--danger); background: var(--danger-soft); }
+.pagination { display: flex; justify-content: space-between; align-items: center; margin-top: 12px; font-size: 12px; color: var(--muted); }
+.pagination .pg { display: flex; gap: 5px; }
+.vh { display: none; }
+</style>
+</head>
+<body data-variant="a">
+
+<div class="picker">
+  <strong>风格预览</strong>
+  <button data-v="a" class="on"><span class="dot" style="background:#2b5fa8"></span>A · 干净企业风</button>
+  <button data-v="b"><span class="dot" style="background:#5148e6"></span>B · 轻盈极简风</button>
+  <button data-v="c"><span class="dot" style="background:#0e7d6c"></span>C · 高密度专业风</button>
+  <span class="tip">点击切换 — 同一页面、三种风格，选好告诉我是哪个字母</span>
+</div>
+
+<div class="app">
+  <aside class="sidebar">
+    <div class="brand"><span class="mark">W</span><div><strong>万顺WMS</strong><small>仓库管理系统</small></div></div>
+    <nav class="nav">
+      <div class="nav-title">日常作业</div>
+      <button class="on"><span class="dot" style="background:#69a5f9"></span>工作台</button>
+      <button><span class="dot" style="background:#47bd86"></span>库存查询</button>
+      <button><span class="dot" style="background:#f0ab4b"></span>拣货任务</button>
+      <button><span class="dot" style="background:#48b8ba"></span>出库管理</button>
+      <div class="nav-title">管理</div>
+      <button><span class="dot" style="background:#a487f1"></span>入库管理</button>
+      <button><span class="dot" style="background:#91a5b8"></span>基础资料</button>
+    </nav>
+    <div class="side-user"><span class="avatar">张</span><div><strong>张伟</strong><span>仓库管理员</span></div></div>
+  </aside>
+
+  <main>
+    <header class="topbar">
+      <h2>库存查询</h2>
+      <div class="top-actions">
+        <button class="btn">导出 Excel</button>
+        <button class="btn primary">+ 新增入库</button>
+      </div>
+    </header>
+    <section class="page">
+
+      <div class="metrics">
+        <div class="metric"><span>SKU 总数</span><strong>1,286</strong></div>
+        <div class="metric t2"><span>库存总量</span><strong>86,420</strong></div>
+        <div class="metric t1"><span>待拣任务</span><strong>37</strong></div>
+        <div class="metric t3"><span>今日出库</span><strong>412</strong></div>
+        <div class="metric t4"><span>低库存预警</span><strong>12</strong></div>
+      </div>
+
+      <div class="panel">
+        <h3>库存明细</h3>
+        <div class="bar">
+          <label>商品编码<input placeholder="如 P2024-0901"></label>
+          <label>商品名称<input placeholder="关键词"></label>
+          <label>仓库<select><option>全部仓库</option><option>上海一号仓</option></select></label>
+          <label>状态<select><option>全部</option><option>正常</option><option>预警</option></select></label>
+          <button class="btn primary">查询</button>
+          <button class="btn">重置</button>
+          <button class="btn">更多筛选 ▾</button>
+        </div>
+
+        <div class="tablewrap">
+          <table>
+            <thead><tr>
+              <th style="width:36px"></th><th style="width:48px">序号</th><th>商品编码</th>
+              <th>商品名称</th><th>仓库 / 库位</th><th class="num">可用库存</th>
+              <th class="num">待拣</th><th>状态</th><th>操作</th>
+            </tr></thead>
+            <tbody>
+              <tr><td><input type="checkbox"></td><td class="num">1</td><td>P2024-0901-01</td>
+                <td><span class="name">农夫山泉 550ml</span><span class="sub">箱规 24 瓶</span></td>
+                <td>一号仓 / A-01-03</td><td class="num qty">2,400</td><td class="num">12</td>
+                <td><span class="badge w">待拣货</span></td>
+                <td><button class="btn sm text">拣货</button><button class="btn sm text">详情</button></td></tr>
+              <tr><td><input type="checkbox"></td><td class="num">2</td><td>P2024-0902-03</td>
+                <td><span class="name">乐事薯片 原味 104g</span><span class="sub">箱规 32 袋</span></td>
+                <td>一号仓 / A-02-11</td><td class="num qty">1,860</td><td class="num">8</td>
+                <td><span class="badge w">待拣货</span></td>
+                <td><button class="btn sm text">拣货</button><button class="btn sm text">详情</button></td></tr>
+              <tr><td><input type="checkbox"></td><td class="num">3</td><td>P2024-0905-12</td>
+                <td><span class="name">蓝月亮洗衣液 2kg</span><span class="sub">箱规 6 瓶</span></td>
+                <td>二号仓 / B-03-06</td><td class="num qty">960</td><td class="num">0</td>
+                <td><span class="badge s">正常</span></td>
+                <td><button class="btn sm text">详情</button></td></tr>
+              <tr><td><input type="checkbox"></td><td class="num">4</td><td>P2024-0911-07</td>
+                <td><span class="name">维达抽纸 3层 100抽</span><span class="sub">箱规 48 包</span></td>
+                <td>二号仓 / B-01-02</td><td class="num qty">45</td><td class="num">20</td>
+                <td><span class="badge d">库存预警</span></td>
+                <td><button class="btn sm text">拣货</button><button class="btn sm text">详情</button></td></tr>
+              <tr><td><input type="checkbox"></td><td class="num">5</td><td>P2024-0918-02</td>
+                <td><span class="name">海天生抽 500ml</span><span class="sub">箱规 12 瓶</span></td>
+                <td>一号仓 / C-05-09</td><td class="num qty">3,120</td><td class="num">0</td>
+                <td><span class="badge s">正常</span></td>
+                <td><button class="btn sm text">详情</button></td></tr>
+              <tr><td><input type="checkbox"></td><td class="num">6</td><td>P2024-0922-05</td>
+                <td><span class="name">金龙鱼食用油 5L</span><span class="sub">箱规 4 桶</span></td>
+                <td>二号仓 / C-01-01</td><td class="num qty">318</td><td class="num">5</td>
+                <td><span class="badge w">待拣货</span></td>
+                <td><button class="btn sm text">拣货</button><button class="btn sm text">详情</button></td></tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="pagination">
+          <span>共 1,286 条 · 第 1 / 43 页</span>
+          <div class="pg"><button class="btn sm">上一页</button><button class="btn sm">1</button><button class="btn sm">2</button><button class="btn sm">3</button><button class="btn sm">下一页</button></div>
+        </div>
+      </div>
+
+    </section>
+  </main>
+</div>
+
+<script>
+document.querySelectorAll('.picker button').forEach(function (b) {
+  b.addEventListener('click', function () {
+    document.body.dataset.variant = b.dataset.v;
+    document.querySelectorAll('.picker button').forEach(function (x) { x.classList.toggle('on', x === b); });
+  });
+});
+</script>
+</body>
+</html>
