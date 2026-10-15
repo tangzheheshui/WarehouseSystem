@@ -5,7 +5,8 @@ Python 标准库 + SQLite + 原生 Web 前端实现，无第三方运行依赖�
 ## 功能
 
 - 管理员：商品信息、仓库信息、项目管理、项目管理员创建和授权。
-- 项目管理员：入库、出库、库存查询导出、拣货单、模板管理、操作日志。
+- 项目管理员：入库、出库、移库、库存查询导出、拣货单、模板管理、操作日志。
+- 移库：同项目内批次在货位间一步移库，支持 Excel 导入与手动录入，独立移库模板与移库单查询。
 - 多项目库存、单据、模板、日志隔离；商品和仓库档案公司共享。
 - 姓名全拼登录，手机号仅作联系方式。
 - 入库/出库支持 Excel 导入与手动录入；入库通知单号、配货单号用户自定义且唯一。
@@ -52,6 +53,17 @@ WMS_PLATFORM_ADMIN_USERNAME=wanshun WMS_PLATFORM_ADMIN_PASSWORD='初始密码' \
 - 未设置平台管理员密码时首启生成随机密码并仅打印一次
 
 生产部署（泛域名证书、nginx、systemd）见 [deployment.md](docs/deployment.md) 的「V5 平台模式」章节。
+
+### 本地演示数据（可复原）
+
+```bash
+python3 seed_demo.py
+./scripts/run.sh --platform --domain localhost --port 8000
+```
+
+一键得到一家「ACME物流」演示公司（控制台 `http://console.localhost:8000`，账号 `wanshun / Local123456`；公司端 `http://acme.localhost:8000`），内含仓库、5 个货位、2 个项目、5 个商品、2 个项目管理员账号、6 张入库单、1 张出库单（待分拣）和对应库存，效期按保质天数自动计算。账号密码见 [seed_demo.py](seed_demo.py) 头部常量。
+
+脚本幂等可重复执行；数据写在 `data/`（不入 git）。换电脑后 clone 仓库 → 重跑本脚本 → 启动服务，即得同一套演示数据。
 
 ### 固定假数据预览
 
