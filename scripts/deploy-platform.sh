@@ -4,6 +4,9 @@
 # 之后日常升级只需运行本脚本；详见 docs/deployment.md「V5 平台模式」。
 set -eu
 
+ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+cd "$ROOT"
+
 REMOTE_HOST=${REMOTE_HOST:-193.112.26.217}
 APP_DIR=${APP_DIR:-/opt/wms-platform}
 DOMAIN=${WMS_DOMAIN:-wms.tangzheheshui.cn}

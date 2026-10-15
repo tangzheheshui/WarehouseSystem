@@ -24,7 +24,7 @@ Python 标准库 + SQLite + 原生 Web 前端实现，无第三方运行依赖�
 ## 本地运行
 
 ```bash
-./run.sh
+./scripts/run.sh
 ```
 
 访问：<http://127.0.0.1:8000/>
@@ -37,7 +37,7 @@ Python 标准库 + SQLite + 原生 Web 前端实现，无第三方运行依赖�
 首次登录会强制修改密码。生产初始化可设置：
 
 ```bash
-WMS_ADMIN_NAME=张三 WMS_ADMIN_USERNAME=zhangsan WMS_ADMIN_PASSWORD='初始密码' ./run.sh
+WMS_ADMIN_NAME=张三 WMS_ADMIN_USERNAME=zhangsan WMS_ADMIN_PASSWORD='初始密码' ./scripts/run.sh
 ```
 
 ### 平台模式（多公司 + 万顺控制台）
@@ -59,12 +59,16 @@ WMS_PLATFORM_ADMIN_USERNAME=wanshun WMS_PLATFORM_ADMIN_PASSWORD='初始密码' \
 scripts/dev-preview.sh
 ```
 
-使用固定账号 `preview / Preview123456`（项目管理员）和 `admin / PreviewAdmin123`（系统管理员），假数据持久化在 `.preview/`，重复启动秒级完成。详见 [local-preview.md](docs/local-preview.md)。
+- 地址：<http://127.0.0.1:8000/>
+- 项目管理员：`preview / Preview123456`，查看项目切换、出入库、库存等业务界面，登录后不强制改密。
+- 系统管理员：`admin / PreviewAdmin123`，查看商品、仓库、项目、用户管理。
+- 预览数据库固定存放在 `.preview/warehouse.db`（已忽略版本控制）；首次启动自动初始化 1 个默认项目 + 4 个示例项目，`preview` 授权全部项目，可直接验证项目切换器与多项目数据隔离；再次启动直接复用，秒级完成。
+- 重置假数据：`rm -rf .preview && scripts/dev-preview.sh`；更换端口：`scripts/dev-preview.sh 8001`。
 
 ## 测试
 
 ```bash
-./tests/scripts/run.sh
+./scripts/run-tests.sh
 ```
 
 覆盖 Excel 读写、登录锁定、权限、项目隔离、导入校验、出入库、到期日计算、历史 CSV、V1 迁移、访问前缀，以及 V5 多公司 Host 分发、控制台鉴权与公司创建/停启用/管理员重置全流程。测试使用临时数据库，自动创建测试账号，不依赖生产环境或 `acme`。
@@ -78,7 +82,7 @@ scripts/dev-preview.sh
 第一家公司：
 
 ```bash
-./deploy.sh acme 193.112.26.217 张三 zhangsan
+./scripts/deploy.sh acme 193.112.26.217 张三 zhangsan
 ```
 
 访问：
@@ -90,7 +94,7 @@ https://acme.wms.tangzheheshui.cn/
 第二家公司自动选择内部端口，证书按子域名自动签发，无需再动 DNS：
 
 ```bash
-./deploy.sh beta 193.112.26.217 李四 lisi
+./scripts/deploy.sh beta 193.112.26.217 李四 lisi
 ```
 
 访问：

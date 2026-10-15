@@ -1,13 +1,16 @@
 #!/bin/sh
 set -eu
 
+ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+cd "$ROOT"
+
 usage() {
   cat <<'USAGE'
 Usage:
-  ./deploy.sh <company-key> [server-ip] [admin-name] [admin-username]
+  ./scripts/deploy.sh <company-key> [server-ip] [admin-name] [admin-username]
 
 Example:
-  ./deploy.sh acme 193.112.26.217 张三 zhangsan
+  ./scripts/deploy.sh acme 193.112.26.217 张三 zhangsan
 
 company-key must be lowercase English letters, numbers, or hyphens.
 admin-name and admin-username are required only for the first deployment.

@@ -11,8 +11,7 @@ tests/
 ├── data/                      # 测试数据
 │   ├── warehouse_data.py      # 临时库基础数据和 Excel 数据构造
 │   └── excel/                 # 本地可查看的 xlsx 样例
-└── scripts/                   # 测试脚本
-    ├── run.sh                 # 本地全量自动化测试入口
+└── scripts/                   # 测试辅助脚本
     ├── build_excel_fixtures.py # 生成本地 Excel 样例
     └── acme_real_test.py      # acme 真实环境端到端验收
 ```
@@ -21,7 +20,7 @@ tests/
 
 | 入口 | 数据库 | 账号 | 是否连 `acme` |
 | --- | --- | --- | --- |
-| `scripts/run.sh` | 每个用例临时创建并自动删除 | 自动创建 `zhangsan`、`liuhaifeng` 测试夹具账号 | 否 |
+| `../scripts/run-tests.sh`（仓库根目录） | 每个用例临时创建并自动删除 | 自动创建 `zhangsan`、`liuhaifeng` 测试夹具账号 | 否 |
 | `scripts/build_excel_fixtures.py` | 临时创建并自动删除 | 不登录业务系统 | 否 |
 | `scripts/acme_real_test.py` | 使用 `acme` 真实库 | 需要真实管理员和项目管理员密码 | 是，可选 |
 
@@ -38,7 +37,7 @@ tests/
 ## 执行测试
 
 ```bash
-./tests/scripts/run.sh
+./scripts/run-tests.sh
 ```
 
 生成本地 Excel 样例：
@@ -47,7 +46,7 @@ tests/
 python3 tests/scripts/build_excel_fixtures.py
 ```
 
-执行 `acme` 真实环境验收（可选，仅用于部署后检查；不在 `run.sh` 中执行）：
+执行 `acme` 真实环境验收（可选，仅用于部署后检查；不在 `run-tests.sh` 中执行）：
 
 ```bash
 python3 tests/scripts/acme_real_test.py \

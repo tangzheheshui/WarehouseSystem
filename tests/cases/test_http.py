@@ -89,8 +89,8 @@ class BasePathTests(unittest.TestCase):
         ))
 
     def test_static_assets_use_relative_paths(self):
-        index = (PROJECT_ROOT / "static" / "index.html").read_text()
-        script = (PROJECT_ROOT / "static" / "app.js").read_text()
+        index = (PROJECT_ROOT / "static" / "index.html").read_text(encoding="utf-8")
+        script = (PROJECT_ROOT / "static" / "app.js").read_text(encoding="utf-8")
         self.assertIn('href="styles.css"', index)
         self.assertIn('src="app.js"', index)
         self.assertIn('<label>姓名全拼<input name="username"', index)

@@ -19,7 +19,7 @@
 
 ```bash
 cd /Users/feng/code/warehouse-management-system
-./deploy.sh acme 193.112.26.217 张三 zhangsan
+./scripts/deploy.sh acme 193.112.26.217 张三 zhangsan
 ```
 
 脚本会自动安装依赖、上传代码、初始化数据库、配置 Nginx 和 systemd，按公司子域名签发 Let's Encrypt 证书并启用 HTTPS，最后显示一次性初始密码。
@@ -37,13 +37,13 @@ DNS 未生效时脚本会退回 HTTP 模式并提示，解析生效后重跑同�
 基础域名默认 `wms.tangzheheshui.cn`，可用环境变量覆盖：
 
 ```bash
-WMS_DOMAIN=wms.example.com ./deploy.sh acme 193.112.26.217 张三 zhangsan
+WMS_DOMAIN=wms.example.com ./scripts/deploy.sh acme 193.112.26.217 张三 zhangsan
 ```
 
 ## 增加公司
 
 ```bash
-./deploy.sh beta 193.112.26.217 李四 lisi
+./scripts/deploy.sh beta 193.112.26.217 李四 lisi
 ```
 
 访问：
@@ -76,7 +76,7 @@ https://beta.wms.tangzheheshui.cn/
 日常升级：
 
 ```bash
-./deploy-platform.sh          # 上传代码 → 服务器跑全量测试 → 重启 → 验证
+./scripts/deploy-platform.sh          # 上传代码 → 服务器跑全量测试 → 重启 → 验证
 ```
 
 回滚 acme（应急）：`sudo sed -i 's|:8010|:8000|' /etc/nginx/sites-available/wms-acme && sudo nginx -s reload && sudo systemctl enable --now wms-acme`，并把 `data/companies/acme/warehouse.db` 换回原库时间点。
@@ -107,7 +107,7 @@ RestartSec=3
 WantedBy=multi-user.target
 ```
 
-之后新增公司在 `https://console.wms.tangzheheshui.cn` 完成：填公司前缀、公司名称、公司管理员姓名全拼，保存后一次性显示初始密码，新公司子域名立即可访问。deploy.sh 保留为首装与应急工具。
+之后新增公司在 `https://console.wms.tangzheheshui.cn` 完成：填公司前缀、公司名称、公司管理员姓名全拼，保存后一次性显示初始密码，新公司子域名立即可访问。scripts/deploy.sh 保留为首装与应急工具。
 
 ## 升级
 
