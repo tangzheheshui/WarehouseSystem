@@ -176,6 +176,12 @@ class Handler(BaseHTTPRequestHandler):
                 f"公司「{company['name']}」已停用，请联系万顺平台管理员", 403
             )
             return False
+        if platform_registry.subscription_state(company) == "expired":
+            self.send_platform_page(
+                f"公司「{company['name']}」订阅已到期，请联系万顺平台管理员续费",
+                403,
+            )
+            return False
         self.company = company
         self.db_path_override = company["db_path"]
         return True
@@ -278,8 +284,8 @@ class Handler(BaseHTTPRequestHandler):
                 body = self.read_json()
                 record, password = registry.create_company(
                     body.get("prefix"), body.get("name"),
-                    body.get("adminUsername"), body.get("adminDisplayName"),
-                    body.get("password"),
+                    body.get("years"), body.get("amount"), body.get("remark"),
+                    operator=admin["username"],
                 )
                 result = platform_registry.public_company(record)
                 result["initialPassword"] = password
@@ -288,6 +294,28 @@ class Handler(BaseHTTPRequestHandler):
                     if self.server.domain else record["prefix"]
                 )
                 self.send_json(result, 201)
+                return
+
+            match = re.fullmatch(
+                r"/api/console/companies/([a-z0-9-]+)", self.path
+            )
+            if match and method == "GET":
+                row, orders = registry.company_orders(match.group(1))
+                result = platform_registry.public_company(row)
+                result["orders"] = orders
+                self.send_json(result)
+                return
+
+            match = re.fullmatch(
+                r"/api/console/companies/([a-z0-9-]+)/renew", self.path
+            )
+            if match and method == "POST":
+                body = self.read_json()
+                row = registry.renew_company(
+                    match.group(1), body.get("years"), body.get("amount"),
+                    body.get("remark"), operator=admin["username"],
+                )
+                self.send_json(platform_registry.public_company(row))
                 return
 
             match = re.fullmatch(

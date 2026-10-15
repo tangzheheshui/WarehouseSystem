@@ -14,6 +14,7 @@ import sys
 import tempfile
 import threading
 import unittest
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -113,17 +114,25 @@ class PlatformServerTestCase(unittest.TestCase):
             type(self).admin_password = new_password
         return token
 
-    def create_company(self, prefix, name=None, admin_username="zhangsan"):
+    def create_company(self, prefix, name=None, years=1):
         token = self.admin_token()
         return self.request(
             "POST", f"console.{DOMAIN}", "/api/console/companies",
             {
                 "prefix": prefix,
                 "name": name or f"{prefix}公司",
-                "adminUsername": admin_username,
+                "years": years,
             },
             token=token,
         )
+
+    def expected_expiry(self, years, start=None):
+        """与 platform_registry 相同的整年顺延算法，用于断言。"""
+        start = start or datetime.now(timezone.utc).date()
+        try:
+            return start.replace(year=start.year + years).isoformat()
+        except ValueError:
+            return start.replace(year=start.year + years, month=2, day=28).isoformat()
 
     def test_console_health_and_login(self):
         status, data = self.request(
@@ -185,14 +194,15 @@ class PlatformServerTestCase(unittest.TestCase):
         self.assertEqual(status, 200, data)
 
     def test_create_company_flow(self):
-        status, company = self.create_company(
-            "acme", name="ACME贸易", admin_username="zhangsan"
-        )
+        status, company = self.create_company("acme", name="ACME贸易")
         self.assertEqual(status, 201, company)
         self.assertEqual(company["prefix"], "acme")
         self.assertEqual(company["name"], "ACME贸易")
         self.assertEqual(company["status"], "active")
-        self.assertEqual(company["adminUsername"], "zhangsan")
+        # 管理员账号固定为 admin，到期日 = 今天 + 订阅时长
+        self.assertEqual(company["adminUsername"], "admin")
+        self.assertEqual(company["expiresAt"], self.expected_expiry(1))
+        self.assertEqual(company["subscriptionState"], "normal")
         self.assertEqual(company["subdomain"], f"acme.{DOMAIN}")
         self.assertTrue(PASSWORD_PATTERN.fullmatch(company["initialPassword"]))
         initial_password = company["initialPassword"]
@@ -208,16 +218,20 @@ class PlatformServerTestCase(unittest.TestCase):
         # 公司管理员可用初始密码登录，且强制改密
         status, login = self.request(
             "POST", "acme.wms.test", "/api/login",
-            {"username": "zhangsan", "password": initial_password},
+            {"username": "admin", "password": initial_password},
         )
         self.assertEqual(status, 200, login)
         self.assertEqual(login["user"]["role"], "admin")
+        self.assertEqual(login["user"]["displayName"], "管理员")
         self.assertTrue(login["user"]["mustChangePassword"])
 
-        # 注册表与数据库文件落地
+        # 注册表与数据库文件落地，首笔开通订单已登记
         record = self.registry.get_company("acme")
         self.assertEqual(record["name"], "ACME贸易")
         self.assertTrue(Path(record["db_path"]).exists())
+        self.assertEqual(len(record["orders"]), 1)
+        self.assertEqual(record["orders"][0]["years"], 1)
+        self.assertEqual(record["orders"][0]["end_at"], record["expires_at"])
 
     def test_create_company_validation(self):
         cases = [
@@ -233,15 +247,140 @@ class PlatformServerTestCase(unittest.TestCase):
             self.assertEqual(status, 400, f"{prefix}({reason}) 应被拒绝")
             self.assertIn("公司前缀", data["error"])
 
-        status, data = self.create_company("acme", admin_username="ZhangSan")
+        status, data = self.create_company("badyears", years=0)
         self.assertEqual(status, 400)
-        self.assertIn("姓名全拼", data["error"])
+        self.assertIn("订阅时长", data["error"])
+        status, data = self.create_company("badyears", years=11)
+        self.assertEqual(status, 400)
+        self.assertIn("订阅时长", data["error"])
 
         status, _ = self.create_company("dupco")
         self.assertEqual(status, 201)
         status, data = self.create_company("dupco")
         self.assertEqual(status, 400)
         self.assertIn("已存在", data["error"])
+
+    def test_subscription_detail_and_renew(self):
+        token = self.admin_token()
+        _, created = self.create_company("subco", years=1)
+        self.assertEqual(created["expiresAt"], self.expected_expiry(1))
+
+        # 详情接口返回完整订单列表（首笔为开通单）
+        status, detail = self.request(
+            "GET", f"console.{DOMAIN}", "/api/console/companies/subco",
+            token=token,
+        )
+        self.assertEqual(status, 200, detail)
+        self.assertEqual(len(detail["orders"]), 1)
+        self.assertEqual(detail["orders"][0]["id"], 1)
+        self.assertEqual(detail["orders"][0]["years"], 1)
+        self.assertEqual(detail["orders"][0]["end_at"], detail["expiresAt"])
+        self.assertEqual(detail["daysLeft"] > 350, True)
+
+        # 未到期续费：在当前到期日基础上顺延，订单追加
+        status, renewed = self.request(
+            "POST", f"console.{DOMAIN}", "/api/console/companies/subco/renew",
+            {"years": 2, "amount": "6800", "remark": "续两年"}, token=token,
+        )
+        self.assertEqual(status, 200, renewed)
+        self.assertEqual(
+            renewed["expiresAt"],
+            self.expected_expiry(2, start=datetime.fromisoformat(created["expiresAt"]).date()),
+        )
+        self.assertEqual(renewed["orderCount"], 2)
+
+        status, detail = self.request(
+            "GET", f"console.{DOMAIN}", "/api/console/companies/subco",
+            token=token,
+        )
+        self.assertEqual(len(detail["orders"]), 2)
+        self.assertEqual(detail["orders"][1]["amount"], "6800")
+        self.assertEqual(detail["orders"][1]["remark"], "续两年")
+        self.assertEqual(detail["orders"][1]["operator"], "wanshun")
+
+        # 金额格式校验
+        status, data = self.request(
+            "POST", f"console.{DOMAIN}", "/api/console/companies/subco/renew",
+            {"years": 1, "amount": "abc"}, token=token,
+        )
+        self.assertEqual(status, 400)
+        self.assertIn("金额", data["error"])
+
+    def test_expired_company_blocked(self):
+        token = self.admin_token()
+        _, created = self.create_company("expireco")
+        status, _ = self.request("GET", "expireco.wms.test", "/api/health")
+        self.assertEqual(status, 200)
+
+        # 进程外把到期日改到昨天（模拟订阅到期）
+        yesterday = (
+            datetime.now(timezone.utc).date() - timedelta(days=1)
+        ).isoformat()
+        with self.registry.lock:
+            self.registry._company_row("expireco")["expires_at"] = yesterday
+            self.registry._save()
+
+        # API 与页面均提示订阅到期；控制台本身不受影响
+        status, data = self.request("GET", "expireco.wms.test", "/api/health")
+        self.assertEqual(status, 403)
+        self.assertIn("订阅已到期", data["error"])
+        status, body, content_type = self.request(
+            "GET", "expireco.wms.test", "/", raw=True
+        )
+        self.assertEqual(status, 403)
+        self.assertIn("text/html", content_type)
+        self.assertIn("订阅已到期", body.decode("utf-8"))
+        status, data = self.request(
+            "GET", f"console.{DOMAIN}", "/api/console/companies", token=token
+        )
+        self.assertEqual(status, 200, data)
+        expired = next(
+            row for row in data if row["prefix"] == "expireco"
+        )
+        self.assertEqual(expired["subscriptionState"], "expired")
+        self.assertEqual(expired["daysLeft"], -1)
+
+        # 续费后立即恢复访问，到期日从今天重算
+        status, renewed = self.request(
+            "POST", f"console.{DOMAIN}",
+            "/api/console/companies/expireco/renew",
+            {"years": 1, "remark": "到期续费"}, token=token,
+        )
+        self.assertEqual(status, 200, renewed)
+        self.assertEqual(renewed["expiresAt"], self.expected_expiry(1))
+        self.assertEqual(renewed["subscriptionState"], "normal")
+        status, data = self.request("GET", "expireco.wms.test", "/api/health")
+        self.assertEqual(status, 200)
+
+    def test_legacy_company_without_expiry_is_perpetual(self):
+        """存量公司没有 expires_at：视为永久有效，不阻断也不强制下单。"""
+        _, created = self.create_company("legacyco")
+        with self.registry.lock:
+            row = self.registry._company_row("legacyco")
+            row.pop("expires_at")
+            row["orders"] = []
+            self.registry._save()
+
+        status, data = self.request("GET", "legacyco.wms.test", "/api/health")
+        self.assertEqual(status, 200)
+
+        token = self.admin_token()
+        status, data = self.request(
+            "GET", f"console.{DOMAIN}", "/api/console/companies", token=token
+        )
+        self.assertEqual(status, 200, data)
+        legacy = next(row for row in data if row["prefix"] == "legacyco")
+        self.assertIsNone(legacy["expiresAt"])
+        self.assertEqual(legacy["subscriptionState"], "perpetual")
+
+        # 也可以随时补登记订阅，从今天起算
+        status, renewed = self.request(
+            "POST", f"console.{DOMAIN}",
+            "/api/console/companies/legacyco/renew",
+            {"years": 1}, token=token,
+        )
+        self.assertEqual(status, 200, renewed)
+        self.assertEqual(renewed["expiresAt"], self.expected_expiry(1))
 
     def test_console_has_no_business_api_and_reverse(self):
         status, data = self.request(
@@ -275,13 +414,13 @@ class PlatformServerTestCase(unittest.TestCase):
         return token, password
 
     def test_cross_company_isolation(self):
-        _, alpha = self.create_company("alpha", admin_username="alice")
-        _, beta = self.create_company("beta", admin_username="bob")
+        _, alpha = self.create_company("alpha")
+        _, beta = self.create_company("beta")
         alpha_token, alpha_password = self.company_session(
-            "alpha", "alice", alpha["initialPassword"]
+            "alpha", "admin", alpha["initialPassword"]
         )
         beta_token, _ = self.company_session(
-            "beta", "bob", beta["initialPassword"]
+            "beta", "admin", beta["initialPassword"]
         )
 
         # A 公司会话在 B 公司子域名无效（按 Host 选库，会话查不到）
@@ -299,7 +438,7 @@ class PlatformServerTestCase(unittest.TestCase):
             "GET", "alpha.wms.test", "/api/me", token=alpha_token
         )
         self.assertEqual(status, 200)
-        self.assertEqual(data["username"], "alice")
+        self.assertEqual(data["username"], "admin")
 
         # 数据也隔离：alpha 建的商品在 beta 不可见
         status, _ = self.request(
@@ -321,7 +460,7 @@ class PlatformServerTestCase(unittest.TestCase):
         self.assertEqual(alpha_password, "Company123456")
 
     def test_disable_and_enable_company(self):
-        _, created = self.create_company("toggleco", admin_username="tadmin")
+        _, created = self.create_company("toggleco")
         self.assertEqual(created["status"], "active")
 
         token = self.admin_token()
@@ -357,9 +496,9 @@ class PlatformServerTestCase(unittest.TestCase):
         self.assertEqual(status, 200)
 
     def test_reset_company_admin_password(self):
-        _, created = self.create_company("resco", admin_username="radmin")
+        _, created = self.create_company("resco")
         token, password = self.company_session(
-            "resco", "radmin", created["initialPassword"]
+            "resco", "admin", created["initialPassword"]
         )
 
         console = self.admin_token()
@@ -379,12 +518,12 @@ class PlatformServerTestCase(unittest.TestCase):
         self.assertEqual(status, 401)
         status, data = self.request(
             "POST", "resco.wms.test", "/api/login",
-            {"username": "radmin", "password": password},
+            {"username": "admin", "password": password},
         )
         self.assertEqual(status, 400)
         status, login = self.request(
             "POST", "resco.wms.test", "/api/login",
-            {"username": "radmin", "password": new_password},
+            {"username": "admin", "password": new_password},
         )
         self.assertEqual(status, 200)
         self.assertTrue(login["user"]["mustChangePassword"])
@@ -397,9 +536,9 @@ class PlatformServerTestCase(unittest.TestCase):
         self.assertIn("公司不存在", data["error"])
 
     def test_company_rename_by_company_admin(self):
-        _, created = self.create_company("renameco", admin_username="nadmin")
+        _, created = self.create_company("renameco")
         token, _ = self.company_session(
-            "renameco", "nadmin", created["initialPassword"]
+            "renameco", "admin", created["initialPassword"]
         )
 
         status, data = self.request(

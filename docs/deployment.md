@@ -107,7 +107,7 @@ RestartSec=3
 WantedBy=multi-user.target
 ```
 
-之后新增公司在 `https://console.wms.tangzheheshui.cn` 完成：填公司前缀、公司名称、公司管理员姓名全拼，保存后一次性显示初始密码，新公司子域名立即可访问。scripts/deploy.sh 保留为首装与应急工具。
+之后新增公司在 `https://console.wms.tangzheheshui.cn` 完成：填公司前缀、公司名称、订阅时长，保存后一次性显示 admin 账号初始密码，新公司子域名立即可访问；订阅到期后子域名返回「订阅已到期」，在控制台续费即恢复。scripts/deploy.sh 保留为首装与应急工具。
 
 ## 升级
 
