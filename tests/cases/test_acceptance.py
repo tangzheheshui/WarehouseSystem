@@ -201,7 +201,7 @@ class WorkflowAcceptanceTests(unittest.TestCase):
             {"unit": "错误单位"},
             {"quantity": 0},
             {"location_name": "不存在货位"},
-            {"production_date": "2026-1-1"},
+            {"production_date": "2026-13-01"},
         ]
         for scenario in scenarios:
             with self.assertRaises(service.ImportValidationError) as caught:

@@ -5,7 +5,7 @@ from email.parser import BytesParser
 from email.policy import default as default_policy
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import parse_qs, unquote, urlparse
+from urllib.parse import parse_qs, quote, unquote, urlparse
 
 import auth
 import db
@@ -562,16 +562,18 @@ class Handler(BaseHTTPRequestHandler):
                 return
             project_id = self.project_id(user)
             template_type = match.group(1)
+            project = connection.execute(
+                "SELECT project_name FROM projects WHERE id = ?", (project_id,)
+            ).fetchone()
+            project_name = project["project_name"] if project else "项目"
+            label = "入库模板" if template_type == "inbound" else "出库模板"
             data = service.template_workbook(
                 connection, template_type, project_id
             )
-            version = service.get_template(
-                connection, template_type, project_id
-            )["version"]
             self.send_bytes(
                 data,
                 "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                f"{template_type}-template-v{version}.xlsx",
+                f"{project_name}-{label}.xlsx",
             )
             return
 
@@ -971,8 +973,11 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(data)))
         if filename:
+            # RFC 5987：filename* 支持中文文件名，filename 提供 ASCII 兜底
+            quoted = quote(filename)
             self.send_header(
-                "Content-Disposition", f'attachment; filename="{filename}"'
+                "Content-Disposition",
+                f"attachment; filename=\"{quoted}\"; filename*=UTF-8''{quoted}",
             )
         self.end_headers()
         self.wfile.write(data)

@@ -191,13 +191,33 @@ class WarehouseFlowTests(unittest.TestCase):
                 self.user,
                 self.project_a["id"],
                 self.workbook("inbound", [
-                    self.inbound_row(batch="", production="2026-8-1", quantity=0),
+                    self.inbound_row(batch="", production="八月一号", quantity=0),
                 ]),
             )
         messages = [error["message"] for error in caught.exception.errors]
         self.assertIn("生产批号不能为空", messages)
-        self.assertIn("日期格式必须为yyyy-MM-dd", messages)
+        self.assertIn("日期无法识别", messages[1])
         self.assertIn("数量必须为正整数", messages)
+
+    def test_import_accepts_common_date_formats(self):
+        """常见日期写法和 Excel 日期序列号都要能识别，统一存 yyyy-MM-dd。"""
+        service.import_inbound(
+            self.connection,
+            self.user,
+            self.project_a["id"],
+            self.workbook("inbound", [
+                self.inbound_row(batch="P1", production="2026/8/1"),
+                self.inbound_row(batch="P2", production="2026年8月2日"),
+                self.inbound_row(batch="P3", production="46235"),
+            ]),
+        )
+        stored = dict(self.connection.execute(
+            "SELECT batch_no, production_date FROM inventory"
+            " WHERE batch_no IN ('P1', 'P2', 'P3')"
+        ).fetchall())
+        self.assertEqual(stored["P1"], "2026-08-01")
+        self.assertEqual(stored["P2"], "2026-08-02")
+        self.assertEqual(stored["P3"], "2026-08-01")
 
     def test_templates_are_project_scoped(self):
         columns = service.get_template(

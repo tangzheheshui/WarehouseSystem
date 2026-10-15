@@ -1626,13 +1626,14 @@ async function renderTemplates() {
         <button class="segment ${state.templateType === "inbound" ? "active" : ""}" data-type="inbound">入库模板</button>
         <button class="segment ${state.templateType === "outbound" ? "active" : ""}" data-type="outbound">出库模板</button>
       </div>
-      ${simpleTable(["系统字段", "Excel列名", "类型", "必填"],
+      ${simpleTable(["标准字段", "Excel列名", "类型", "必填"],
         current.columns.map((column, index) => [
-          `<span class="mono">${esc(column.key)}</span>`,
+          esc(column.label || column.key),
           `<input data-index="${index}" data-field="name" value="${esc(column.name)}">`,
           column.type === "text" ? "文本" : column.type === "date" ? "日期" : "正整数",
           `<input type="checkbox" data-index="${index}" data-field="required"
-            ${column.required ? "checked" : ""}>`,
+            ${column.required ? "checked" : ""} ${column.locked ? "disabled" : ""}
+            title="${column.locked ? "系统必填字段，不可取消" : "勾选后导入时该列不能留空"}">`,
         ]))}
       <div class="actions" style="margin-top:12px">
         <button class="btn primary" id="saveTemplate">保存并生成新版本</button>
@@ -1640,6 +1641,7 @@ async function renderTemplates() {
         <span class="muted">当前版本 v${current.version}</span>
         <span class="muted">状态：${current.status === "active" ? "启用" : "停用"}</span>
       </div>
+      <p class="muted">说明：修改「Excel列名」后，导入文件的表头需使用新列名；灰色的必填勾选是系统必填字段，不可取消。</p>
     </div>`;
   document.querySelectorAll(".segment").forEach(button => {
     button.onclick = () => {

@@ -6,7 +6,7 @@ from datetime import datetime, timedelta, timezone
 
 import excelio
 from auth import valid_phone, valid_username
-from db import columns_for
+from db import DEFAULT_TEMPLATES, columns_for
 from security import hash_password, iso_now, valid_password
 
 
@@ -721,11 +721,21 @@ def get_template(connection, order_type, project_id):
     ).fetchone()
     if not row:
         raise ValueError("模板不存在")
+    defaults = {
+        column["key"]: column["name"]
+        for column in DEFAULT_TEMPLATES.get(order_type, ())
+    }
+    required_keys = REQUIRED_FIELDS.get(order_type, ())
     return {
         "type": order_type,
         "version": row["version"],
         "status": row["status"],
-        "columns": json.loads(row["columns_json"]),
+        "columns": [
+            {**column,
+             "label": defaults.get(column["key"], column["name"]),
+             "locked": column["key"] in required_keys}
+            for column in json.loads(row["columns_json"])
+        ],
     }
 
 
@@ -815,13 +825,22 @@ def _error(errors, row, column, message):
 
 
 def _parse_date(value):
-    try:
-        parsed = datetime.strptime(str(value).strip(), "%Y-%m-%d").date()
-    except ValueError:
+    """归一化常见日期写法与 Excel 日期序列号，返回 date 对象（YYYY-MM-DD）。"""
+    text = str(value or "").strip().lstrip("= \t").strip('"').strip()
+    if not text:
         return None
-    if parsed.isoformat() != str(value).strip():
-        return None
-    return parsed
+    for pattern in ("%Y-%m-%d", "%Y/%m/%d", "%Y.%m.%d", "%Y年%m月%d日", "%Y%m%d"):
+        try:
+            return datetime.strptime(text, pattern).date()
+        except ValueError:
+            continue
+    if text.isdigit():
+        # Excel 日期单元格存的是序列号（1899-12-30 起算的天数），
+        # 用户在模板里正常输入日期就会得到它，必须还原
+        serial = int(text)
+        if 20000 <= serial <= 80000:
+            return (datetime(1899, 12, 30) + timedelta(days=serial)).date()
+    return None
 
 
 def parse_import(connection, project_id, data, order_type):
@@ -883,7 +902,7 @@ def parse_import(connection, project_id, data, order_type):
                 parsed_date = _parse_date(raw)
                 if parsed_date is None:
                     _error(errors, excel_row, column["name"],
-                           "日期格式必须为yyyy-MM-dd")
+                           f"日期无法识别：{raw}（可用 2026-01-31、2026/1/31、2026年1月31日）")
                     item[key] = None
                 else:
                     item[key] = parsed_date.isoformat()
@@ -1026,7 +1045,7 @@ def _manual_date(value, name):
         return None
     parsed = _parse_date(value)
     if parsed is None:
-        raise ValueError(f"{name}格式必须为yyyy-MM-dd")
+        raise ValueError(f"{name}无法识别：{value}（可用 2026-01-31、2026/1/31）")
     return parsed.isoformat()
 
 
@@ -1892,15 +1911,13 @@ def _history_text(value):
 
 
 def _history_date(value):
-    value = _history_text(value)
-    if not value:
+    text = _history_text(value)
+    if not text:
         return None
-    for pattern in ("%Y-%m-%d", "%Y/%m/%d"):
-        try:
-            return datetime.strptime(value[:10], pattern).date().isoformat()
-        except ValueError:
-            pass
-    raise ValueError(f"日期格式无效：{value}")
+    parsed = _parse_date(text)
+    if parsed is None:
+        raise ValueError(f"日期格式无效：{text}")
+    return parsed.isoformat()
 
 
 def _history_int(value, name, allow_zero=False):
