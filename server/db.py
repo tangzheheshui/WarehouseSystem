@@ -38,6 +38,17 @@ DEFAULT_TEMPLATES = {
         {"key": "recipient", "name": "收货方", "required": False, "type": "text"},
         {"key": "note", "name": "备注", "required": False, "type": "text"},
     ],
+    "move": [
+        {"key": "order_no", "name": "移库单号", "required": True, "type": "text"},
+        {"key": "order_date", "name": "移库日期", "required": True, "type": "date"},
+        {"key": "product_code", "name": "货品编号", "required": True, "type": "text"},
+        {"key": "batch_no", "name": "生产批号", "required": True, "type": "text"},
+        {"key": "quantity", "name": "数量", "required": True, "type": "integer"},
+        {"key": "unit", "name": "单位", "required": True, "type": "text"},
+        {"key": "from_location", "name": "源货位", "required": True, "type": "text"},
+        {"key": "to_location", "name": "目标货位", "required": True, "type": "text"},
+        {"key": "note", "name": "备注", "required": False, "type": "text"},
+    ],
 }
 
 SCHEMA = """
@@ -152,7 +163,7 @@ CREATE TABLE IF NOT EXISTS stock_orders (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     project_id INTEGER NOT NULL REFERENCES projects(id),
     order_no TEXT NOT NULL UNIQUE,
-    order_type TEXT NOT NULL CHECK(order_type IN ('inbound', 'outbound', 'history_import')),
+    order_type TEXT NOT NULL CHECK(order_type IN ('inbound', 'outbound', 'history_import', 'move')),
     status TEXT NOT NULL CHECK(status IN ('pending_picking', 'completed')),
     operator_id INTEGER NOT NULL REFERENCES users(id),
     operator_name TEXT NOT NULL,
@@ -173,6 +184,7 @@ CREATE TABLE IF NOT EXISTS stock_order_items (
     spec TEXT,
     batch_no TEXT,
     location_id INTEGER,
+    to_location_id INTEGER REFERENCES warehouse_locations(id),
     quantity INTEGER NOT NULL CHECK(quantity > 0),
     note TEXT,
     created_at TEXT NOT NULL
@@ -185,7 +197,7 @@ CREATE TABLE IF NOT EXISTS stock_logs (
     product_id TEXT NOT NULL,
     batch_no TEXT NOT NULL,
     location_id INTEGER NOT NULL REFERENCES warehouse_locations(id),
-    change_type TEXT NOT NULL CHECK(change_type IN ('inbound', 'outbound', 'history_import')),
+    change_type TEXT NOT NULL CHECK(change_type IN ('inbound', 'outbound', 'history_import', 'move_out', 'move_in')),
     change_quantity INTEGER NOT NULL,
     operator_name TEXT NOT NULL,
     created_at TEXT NOT NULL
@@ -219,7 +231,7 @@ CREATE TABLE IF NOT EXISTS picking_items (
 CREATE TABLE IF NOT EXISTS templates (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     project_id INTEGER NOT NULL REFERENCES projects(id),
-    template_type TEXT NOT NULL CHECK(template_type IN ('inbound', 'outbound')),
+    template_type TEXT NOT NULL CHECK(template_type IN ('inbound', 'outbound', 'move')),
     version INTEGER NOT NULL,
     columns_json TEXT NOT NULL,
     status TEXT NOT NULL DEFAULT 'active' CHECK(status IN ('active', 'disabled')),
@@ -261,6 +273,54 @@ CREATE INDEX IF NOT EXISTS idx_audit_logs_project_time
     ON audit_logs(project_id, created_at);
 """
 
+# 以下三条 DDL 与 SCHEMA 中对应表保持同步（含移库所需的 CHECK 扩展），
+# 仅供 _migrate_v5 重建旧表使用。
+STOCK_ORDERS_DDL = """
+CREATE TABLE stock_orders (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    project_id INTEGER NOT NULL REFERENCES projects(id),
+    order_no TEXT NOT NULL UNIQUE,
+    order_type TEXT NOT NULL CHECK(order_type IN ('inbound', 'outbound', 'history_import', 'move')),
+    status TEXT NOT NULL CHECK(status IN ('pending_picking', 'completed')),
+    operator_id INTEGER NOT NULL REFERENCES users(id),
+    operator_name TEXT NOT NULL,
+    template_version INTEGER NOT NULL,
+    note TEXT,
+    order_date TEXT,
+    recipient TEXT,
+    created_at TEXT NOT NULL,
+    completed_at TEXT
+)
+"""
+
+STOCK_LOGS_DDL = """
+CREATE TABLE stock_logs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    project_id INTEGER NOT NULL REFERENCES projects(id),
+    order_no TEXT NOT NULL,
+    product_id TEXT NOT NULL,
+    batch_no TEXT NOT NULL,
+    location_id INTEGER NOT NULL REFERENCES warehouse_locations(id),
+    change_type TEXT NOT NULL CHECK(change_type IN ('inbound', 'outbound', 'history_import', 'move_out', 'move_in')),
+    change_quantity INTEGER NOT NULL,
+    operator_name TEXT NOT NULL,
+    created_at TEXT NOT NULL
+)
+"""
+
+TEMPLATES_DDL = """
+CREATE TABLE templates (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    project_id INTEGER NOT NULL REFERENCES projects(id),
+    template_type TEXT NOT NULL CHECK(template_type IN ('inbound', 'outbound', 'move')),
+    version INTEGER NOT NULL,
+    columns_json TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'active' CHECK(status IN ('active', 'disabled')),
+    updated_at TEXT NOT NULL,
+    UNIQUE(project_id, template_type)
+)
+"""
+
 
 def db_path():
     return Path(os.environ.get("WMS_DB_PATH", str(DEFAULT_DB_PATH)))
@@ -283,6 +343,14 @@ def _columns(connection, table):
 
 def _rows(connection, table):
     return [dict(row) for row in connection.execute(f"SELECT * FROM {table}")]
+
+
+def _create_sql(connection, table):
+    row = connection.execute(
+        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?",
+        (table,),
+    ).fetchone()
+    return row[0] if row else ""
 
 
 def _parse_date(value):
@@ -556,6 +624,7 @@ def init_db(path=None, admin_username=None, admin_display_name=None,
         with connection:
             connection.executescript(SCHEMA)
             _migrate_v4_columns(connection)
+            _migrate_v5(connection)
             _reset_templates_v4(connection)
             if connection.execute("SELECT COUNT(*) FROM projects").fetchone()[0] == 0:
                 connection.execute(
@@ -656,6 +725,75 @@ def _migrate_v4_columns(connection):
             value TEXT NOT NULL
         )"""
     )
+
+
+def _migrate_v5(connection):
+    """V5 移库：扩展 stock_orders/stock_logs/templates 的 CHECK 约束（重建三表搬数据），
+    并为 stock_order_items 补 to_location_id 列。新库或已迁移库直接返回。"""
+    if ("move" in _create_sql(connection, "stock_orders")
+            and "to_location_id" in _columns(connection, "stock_order_items")):
+        return
+    if "move" not in _create_sql(connection, "stock_orders"):
+        orders = _rows(connection, "stock_orders")
+        logs = _rows(connection, "stock_logs")
+        templates = _rows(connection, "templates")
+        connection.commit()
+        connection.execute("PRAGMA foreign_keys = OFF")
+        connection.execute("BEGIN IMMEDIATE")
+        try:
+            connection.execute("DROP TABLE stock_orders")
+            connection.execute(STOCK_ORDERS_DDL)
+            connection.execute("DROP TABLE stock_logs")
+            connection.execute(STOCK_LOGS_DDL)
+            connection.execute("DROP TABLE templates")
+            connection.execute(TEMPLATES_DDL)
+            for row in orders:
+                connection.execute(
+                    """INSERT INTO stock_orders
+                       (id, project_id, order_no, order_type, status, operator_id,
+                        operator_name, template_version, note, order_date, recipient,
+                        created_at, completed_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    tuple(row[name] for name in (
+                        "id", "project_id", "order_no", "order_type", "status",
+                        "operator_id", "operator_name", "template_version",
+                        "note", "order_date", "recipient", "created_at",
+                        "completed_at")),
+                )
+            for row in logs:
+                connection.execute(
+                    """INSERT INTO stock_logs
+                       (id, project_id, order_no, product_id, batch_no, location_id,
+                        change_type, change_quantity, operator_name, created_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    tuple(row[name] for name in (
+                        "id", "project_id", "order_no", "product_id", "batch_no",
+                        "location_id", "change_type", "change_quantity",
+                        "operator_name", "created_at")),
+                )
+            for row in templates:
+                connection.execute(
+                    """INSERT INTO templates
+                       (id, project_id, template_type, version, columns_json,
+                        status, updated_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                    tuple(row[name] for name in (
+                        "id", "project_id", "template_type", "version",
+                        "columns_json", "status", "updated_at")),
+                )
+            connection.commit()
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.execute("PRAGMA foreign_keys = ON")
+    if "to_location_id" not in _columns(connection, "stock_order_items"):
+        connection.execute(
+            """ALTER TABLE stock_order_items ADD COLUMN to_location_id
+               INTEGER REFERENCES warehouse_locations(id)"""
+        )
+        connection.commit()
+    connection.executescript(INDEXES)
 
 
 def _reset_templates_v4(connection):

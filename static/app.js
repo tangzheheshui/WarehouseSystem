@@ -41,6 +41,7 @@ const titles = {
   dashboard: "工作台",
   inbound: "入库管理",
   outbound: "出库管理",
+  move: "移库管理",
   inventory: "库存查询",
   picking: "拣货单",
   products: "商品信息",
@@ -66,6 +67,7 @@ const projectPages = [
   { id: "dashboard", label: "工作台", group: "总览", tone: "blue" },
   { id: "inbound", label: "入库管理", group: "仓库作业", tone: "green" },
   { id: "outbound", label: "出库管理", group: "仓库作业", tone: "amber" },
+  { id: "move", label: "移库管理", group: "仓库作业", tone: "cyan" },
   { id: "inventory", label: "库存查询", group: "库存中心", tone: "blue" },
   { id: "picking", label: "拣货单", group: "库存中心", tone: "teal" },
   { id: "templates", label: "模板管理", group: "配置审计", tone: "violet" },
@@ -363,7 +365,9 @@ function orderTable(rows) {
 }
 
 function orderType(value) {
-  return { inbound: "入库", outbound: "出库", history_import: "历史导入" }[value] || value;
+  return {
+    inbound: "入库", outbound: "出库", move: "移库", history_import: "历史导入",
+  }[value] || value;
 }
 
 function importResultHtml(result, type) {
@@ -371,12 +375,13 @@ function importResultHtml(result, type) {
   if (result.ok) {
     return `<div class="result-box">
       <div class="result-title">
-        <span>${type === "inbound" ? "入库成功" : "出库成功"}</span>
+        <span>${IMPORT_LABELS[type] || type}成功</span>
         <span class="mono">${esc(result.orderNo)}</span>
       </div>
       <div>${result.aggregated.map(item => {
         const detail = item.batchNo ? ` / ${item.batchNo}` : "";
-        return `${esc(item.productCode)}${esc(detail)}：${esc(item.quantity)}`;
+        const lane = item.from ? `：${esc(item.from)} → ${esc(item.to)}，` : "：";
+        return `${esc(item.productCode)}${esc(detail)}${lane}${esc(item.quantity)}`;
       }).join("；")}</div>
       ${type === "outbound" && result.pickNo ? `<div>拣货单：${esc(result.pickNo)}</div>` : ""}
     </div>`;
@@ -390,8 +395,10 @@ function importResultHtml(result, type) {
   </div>`;
 }
 
+const IMPORT_LABELS = { inbound: "入库", outbound: "出库", move: "移库" };
+
 async function renderImportPage(type) {
-  const label = type === "inbound" ? "入库" : "出库";
+  const label = IMPORT_LABELS[type] || type;
   const result = state.importResult[type] || {};
   const manualFields = type === "inbound"
     ? [
@@ -406,6 +413,18 @@ async function renderImportPage(type) {
         ["unit", "单位", "text"],
         ["locationName", "货位", "text"],
         ["purchaseOrderNo", "采购单号", "text"],
+        ["note", "备注", "text"],
+      ]
+    : type === "move"
+    ? [
+        ["orderNo", "移库单号", "text"],
+        ["orderDate", "移库日期", "date"],
+        ["productCode", "货品编号", "text", "moveProductList"],
+        ["batchNo", "生产批号", "text", "moveBatchList"],
+        ["quantity", "数量", "number"],
+        ["unit", "单位", "text"],
+        ["fromLocation", "源货位", "text", "moveLocationList"],
+        ["toLocation", "目标货位", "text", "moveLocationList"],
         ["note", "备注", "text"],
       ]
     : [
@@ -434,15 +453,20 @@ async function renderImportPage(type) {
     <div class="panel">
       <div class="panel-header"><h3>手动新增${label}</h3></div>
       <form id="manualForm" class="fields-row wide">
-        ${manualFields.map(([name, fieldLabel, kind]) => {
+        ${manualFields.map(([name, fieldLabel, kind, listId]) => {
           if (kind === "quality") {
             return `<label>${fieldLabel}<select name="${name}">
               <option value="良品">良品</option><option value="扣留">扣留</option>
             </select></label>`;
           }
           const attrs = kind === "date" ? " type=\"date\"" : kind === "number" ? " type=\"number\" min=\"1\" step=\"1\"" : "";
-          return `<label>${fieldLabel}<input name="${name}"${attrs}></label>`;
+          const listAttr = listId ? ` list="${listId}"` : "";
+          return `<label>${fieldLabel}<input name="${name}"${attrs}${listAttr}></label>`;
         }).join("")}
+        ${type === "move" ? `
+        <datalist id="moveProductList"></datalist>
+        <datalist id="moveBatchList"></datalist>
+        <datalist id="moveLocationList"></datalist>` : ""}
         <button class="btn primary" type="submit">提交</button>
       </form>
     </div>
@@ -519,6 +543,7 @@ async function renderImportPage(type) {
     loadImportOrders(type, new FormData(event.target));
   };
   await loadImportOrders(type, new FormData(document.getElementById("orderFilter")));
+  if (type === "move") attachMoveDatalists();
 }
 
 async function loadImportOrders(type, form) {
@@ -526,6 +551,55 @@ async function loadImportOrders(type, form) {
   query.set("type", type);
   const orders = await api(`orders?${query}`);
   document.getElementById("orderList").innerHTML = orderTable(orders);
+}
+
+async function attachMoveDatalists() {
+  let options;
+  try {
+    options = await api("inventory/filters");
+  } catch (_) {
+    return;
+  }
+  const locationList = document.getElementById("moveLocationList");
+  const productList = document.getElementById("moveProductList");
+  const batchList = document.getElementById("moveBatchList");
+  if (!locationList || !productList || !batchList) return;
+  const locations = new Set();
+  const products = new Map();
+  const batchesByProduct = {};
+  for (const record of options.records || []) {
+    locations.add(record.location_name);
+    if (record.cargo_area) {
+      locations.add(`${record.cargo_area}/${record.location_name}`);
+    }
+    if (!products.has(record.product_id)) {
+      products.set(
+        record.product_id,
+        `${record.product_id} ${record.product_name || ""}`.trim(),
+      );
+    }
+    if (record.batch_no) {
+      if (!batchesByProduct[record.product_id]) {
+        batchesByProduct[record.product_id] = new Set();
+      }
+      batchesByProduct[record.product_id].add(record.batch_no);
+    }
+  }
+  locationList.innerHTML = [...locations].sort().map(value =>
+    `<option value="${esc(value)}"></option>`).join("");
+  productList.innerHTML = [...products].map(([code, text]) =>
+    `<option value="${esc(code)}">${esc(text)}</option>`).join("");
+  const codeInput = document.querySelector("#manualForm input[name=productCode]");
+  const refreshBatches = () => {
+    const code = codeInput ? codeInput.value.trim() : "";
+    const known = batchesByProduct[code]
+      || new Set(Object.keys(batchesByProduct).flatMap(
+        key => [...batchesByProduct[key]]));
+    batchList.innerHTML = [...known].sort().map(value =>
+      `<option value="${esc(value)}"></option>`).join("");
+  };
+  refreshBatches();
+  if (codeInput) codeInput.addEventListener("input", refreshBatches);
 }
 
 async function renderInventory() {
@@ -1623,8 +1697,9 @@ async function renderTemplates() {
       <div class="panel-header"><h3>模板列配置</h3>
         <button class="btn" id="downloadTemplate">下载当前模板</button></div>
       <div class="template-tabs">
-        <button class="segment ${state.templateType === "inbound" ? "active" : ""}" data-type="inbound">入库模板</button>
-        <button class="segment ${state.templateType === "outbound" ? "active" : ""}" data-type="outbound">出库模板</button>
+        ${[["inbound", "入库模板"], ["outbound", "出库模板"], ["move", "移库模板"]].map(([id, text]) =>
+          `<button class="segment ${state.templateType === id ? "active" : ""}" data-type="${id}">${text}</button>`
+        ).join("")}
       </div>
       ${simpleTable(["标准字段", "Excel列名", "类型", "必填"],
         current.columns.map((column, index) => [
@@ -1695,7 +1770,7 @@ async function renderLogs() {
 
 function actionLabel(value) {
   const labels = {
-    "stock.inbound": "入库", "stock.outbound": "出库",
+    "stock.inbound": "入库", "stock.outbound": "出库", "stock.move": "移库",
     "picking.complete": "拣货完成", "template.update": "模板修改",
     "template.status": "模板状态", "inventory.history_import": "历史库存导入",
     "user.create": "创建用户", "user.update": "修改用户",
@@ -1790,6 +1865,7 @@ async function renderPage() {
     if (page === "dashboard") await renderDashboard();
     else if (page === "inbound") await renderImportPage("inbound");
     else if (page === "outbound") await renderImportPage("outbound");
+    else if (page === "move") await renderImportPage("move");
     else if (page === "inventory") await renderInventory();
     else if (page === "picking") await renderPicking();
     else if (page === "templates") await renderTemplates();

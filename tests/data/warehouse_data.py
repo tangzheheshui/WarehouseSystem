@@ -59,6 +59,14 @@ class WarehouseDataFactory:
             "A货区",
             "A-01",
         )
+        self.location_b = service.create_location(
+            self.connection,
+            self.admin,
+            self.warehouse["id"],
+            "A库区",
+            "A货区",
+            "A-02",
+        )
         self.project_a = service.create_project(
             self.connection, self.admin, "自动化测试项目A",
             self.warehouse["id"], "A库区", "双角色验收",
@@ -151,6 +159,17 @@ class WarehouseDataFactory:
                 "unit": "个",
                 "location_name": "",
                 "recipient": "自动化收货方",
+                "note": "",
+            },
+            "move": {
+                "order_no": f"AUTO-MV-{self.order_serial:04d}",
+                "order_date": "2026-01-04",
+                "product_code": "AUTO-P001",
+                "batch_no": "AUTO-B001",
+                "quantity": 1,
+                "unit": "个",
+                "from_location": "A-01",
+                "to_location": "A-02",
                 "note": "",
             },
         }[order_type]

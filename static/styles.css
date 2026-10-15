@@ -306,6 +306,7 @@ button[data-tone="blue"] .nav-dot { background: #69a5f9; }
 button[data-tone="green"] .nav-dot { background: #47bd86; }
 button[data-tone="amber"] .nav-dot { background: #f0ab4b; }
 button[data-tone="teal"] .nav-dot { background: #48b8ba; }
+button[data-tone="cyan"] .nav-dot { background: #45a8d8; }
 button[data-tone="violet"] .nav-dot { background: #a487f1; }
 button[data-tone="slate"] .nav-dot { background: #91a5b8; }
 

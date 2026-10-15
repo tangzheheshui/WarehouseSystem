@@ -528,10 +528,11 @@ class Handler(BaseHTTPRequestHandler):
             self.send_json([
                 service.get_template(connection, "inbound", project_id),
                 service.get_template(connection, "outbound", project_id),
+                service.get_template(connection, "move", project_id),
             ])
             return
 
-        match = re.fullmatch(r"/api/templates/(inbound|outbound)", self.path)
+        match = re.fullmatch(r"/api/templates/(inbound|outbound|move)", self.path)
         if match and method == "PUT":
             user = self.require_user(connection, role="project_admin")
             if not user:
@@ -543,7 +544,9 @@ class Handler(BaseHTTPRequestHandler):
             ))
             return
 
-        match = re.fullmatch(r"/api/templates/(inbound|outbound)/status", self.path)
+        match = re.fullmatch(
+            r"/api/templates/(inbound|outbound|move)/status", self.path
+        )
         if match and method == "POST":
             user = self.require_user(connection, role="project_admin")
             if not user:
@@ -555,7 +558,9 @@ class Handler(BaseHTTPRequestHandler):
             ))
             return
 
-        match = re.fullmatch(r"/api/templates/(inbound|outbound)/download", self.path)
+        match = re.fullmatch(
+            r"/api/templates/(inbound|outbound|move)/download", self.path
+        )
         if match and method == "GET":
             user = self.require_user(connection, role="project_admin")
             if not user:
@@ -566,7 +571,11 @@ class Handler(BaseHTTPRequestHandler):
                 "SELECT project_name FROM projects WHERE id = ?", (project_id,)
             ).fetchone()
             project_name = project["project_name"] if project else "项目"
-            label = "入库模板" if template_type == "inbound" else "出库模板"
+            label = {
+                "inbound": "入库模板",
+                "outbound": "出库模板",
+                "move": "移库模板",
+            }[template_type]
             data = service.template_workbook(
                 connection, template_type, project_id
             )
@@ -596,7 +605,7 @@ class Handler(BaseHTTPRequestHandler):
             )
             return
 
-        match = re.fullmatch(r"/api/(inbound|outbound)/upload", self.path)
+        match = re.fullmatch(r"/api/(inbound|outbound|move)/upload", self.path)
         if match and method == "POST":
             user = self.require_user(connection, role="project_admin")
             if not user:
@@ -604,29 +613,33 @@ class Handler(BaseHTTPRequestHandler):
             filename, data = self.multipart_file(service.MAX_FILE_SIZE)
             if not filename.lower().endswith(".xlsx"):
                 raise ValueError("仅支持xlsx格式文件")
-            importer = (
-                service.import_inbound
-                if match.group(1) == "inbound"
-                else service.import_outbound
-            )
+            importers = {
+                "inbound": service.import_inbound,
+                "outbound": service.import_outbound,
+                "move": service.import_move,
+            }
             self.send_json(
-                importer(connection, user, self.project_id(user), data)
+                importers[match.group(1)](
+                    connection, user, self.project_id(user), data
+                )
             )
             return
 
-        match = re.fullmatch(r"/api/(inbound|outbound)/manual", self.path)
+        match = re.fullmatch(r"/api/(inbound|outbound|move)/manual", self.path)
         if match and method == "POST":
             user = self.require_user(connection, role="project_admin")
             if not user:
                 return
             body = self.read_json()
-            creator = (
-                service.create_manual_inbound
-                if match.group(1) == "inbound"
-                else service.create_manual_outbound
-            )
+            creators = {
+                "inbound": service.create_manual_inbound,
+                "outbound": service.create_manual_outbound,
+                "move": service.create_manual_move,
+            }
             self.send_json(
-                creator(connection, user, self.project_id(user), body)
+                creators[match.group(1)](
+                    connection, user, self.project_id(user), body
+                )
             )
             return
 
@@ -1013,6 +1026,9 @@ class Handler(BaseHTTPRequestHandler):
 def create_server(host, port, database_path, base_path="/", registry=None,
                   domain=None):
     if registry is not None:
+        for company in registry.companies():
+            if company.get("status") == "active":
+                db.init_db(registry.company_db_path(company["prefix"]))
         generated = registry.ensure_platform_admin()
         if generated:
             print("平台管理员初始密码（仅本次显示，请立即保存）：", generated)

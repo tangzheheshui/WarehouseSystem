@@ -117,6 +117,69 @@ CREATE TABLE audit_logs (
 """
 
 
+V4_STOCK_ORDERS_DDL = """
+CREATE TABLE stock_orders (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    project_id INTEGER NOT NULL REFERENCES projects(id),
+    order_no TEXT NOT NULL UNIQUE,
+    order_type TEXT NOT NULL CHECK(order_type IN ('inbound', 'outbound', 'history_import')),
+    status TEXT NOT NULL CHECK(status IN ('pending_picking', 'completed')),
+    operator_id INTEGER NOT NULL REFERENCES users(id),
+    operator_name TEXT NOT NULL,
+    template_version INTEGER NOT NULL,
+    note TEXT,
+    order_date TEXT,
+    recipient TEXT,
+    created_at TEXT NOT NULL,
+    completed_at TEXT
+)
+"""
+
+V4_STOCK_LOGS_DDL = """
+CREATE TABLE stock_logs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    project_id INTEGER NOT NULL REFERENCES projects(id),
+    order_no TEXT NOT NULL,
+    product_id TEXT NOT NULL,
+    batch_no TEXT NOT NULL,
+    location_id INTEGER NOT NULL REFERENCES warehouse_locations(id),
+    change_type TEXT NOT NULL CHECK(change_type IN ('inbound', 'outbound', 'history_import')),
+    change_quantity INTEGER NOT NULL,
+    operator_name TEXT NOT NULL,
+    created_at TEXT NOT NULL
+)
+"""
+
+V4_TEMPLATES_DDL = """
+CREATE TABLE templates (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    project_id INTEGER NOT NULL REFERENCES projects(id),
+    template_type TEXT NOT NULL CHECK(template_type IN ('inbound', 'outbound')),
+    version INTEGER NOT NULL,
+    columns_json TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'active' CHECK(status IN ('active', 'disabled')),
+    updated_at TEXT NOT NULL,
+    UNIQUE(project_id, template_type)
+)
+"""
+
+V4_STOCK_ORDER_ITEMS_DDL = """
+CREATE TABLE stock_order_items (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    order_id INTEGER NOT NULL REFERENCES stock_orders(id) ON DELETE CASCADE,
+    row_no INTEGER NOT NULL,
+    product_id TEXT NOT NULL,
+    product_name TEXT NOT NULL,
+    spec TEXT,
+    batch_no TEXT,
+    location_id INTEGER,
+    quantity INTEGER NOT NULL CHECK(quantity > 0),
+    note TEXT,
+    created_at TEXT NOT NULL
+)
+"""
+
+
 class MigrationTests(unittest.TestCase):
     def test_v1_database_moves_to_default_project(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -218,6 +281,124 @@ class MigrationTests(unittest.TestCase):
                 "SELECT project_id FROM audit_logs"
             ).fetchone()[0], 1)
             self.assertEqual(migrated.execute("PRAGMA foreign_key_check").fetchall(), [])
+            migrated.close()
+
+    def test_v5_database_gains_move_and_preserves_data(self):
+        """V4 库升级：三表 CHECK 扩展 move、明细表补 to_location_id，数据保留。"""
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "v4.db"
+            db.init_db(path)
+            connection = db.connect(path)
+            project_id = connection.execute(
+                "SELECT id FROM projects LIMIT 1"
+            ).fetchone()[0]
+            location_id = connection.execute(
+                "SELECT id FROM warehouse_locations LIMIT 1"
+            ).fetchone()[0]
+            admin_id = connection.execute(
+                "SELECT id FROM users WHERE role = 'admin' LIMIT 1"
+            ).fetchone()[0]
+            # 降级为 V4 结构，模拟旧公司库
+            connection.execute("PRAGMA foreign_keys = OFF")
+            for table in ("stock_order_items", "stock_orders", "stock_logs",
+                          "templates"):
+                connection.execute(f"DROP TABLE {table}")
+            connection.execute(V4_STOCK_ORDERS_DDL)
+            connection.execute(V4_STOCK_LOGS_DDL)
+            connection.execute(V4_TEMPLATES_DDL)
+            connection.execute(V4_STOCK_ORDER_ITEMS_DDL)
+            connection.execute(
+                """INSERT INTO stock_orders
+                   (id, project_id, order_no, order_type, status, operator_id,
+                    operator_name, template_version, note, order_date, recipient,
+                    created_at, completed_at)
+                   VALUES (1, ?, 'RK-OLD', 'inbound', 'completed', ?, '张三',
+                           1, NULL, '2026-01-02', NULL, '2026-01-02', '2026-01-02')""",
+                (project_id, admin_id),
+            )
+            connection.execute(
+                """INSERT INTO stock_order_items
+                   (order_id, row_no, product_id, product_name, spec, batch_no,
+                    location_id, quantity, note, created_at)
+                   VALUES (1, 1, 'H001', '旧商品', '10g', 'B1', ?, 8,
+                           NULL, '2026-01-02')""",
+                (location_id,),
+            )
+            connection.execute(
+                """INSERT INTO stock_logs
+                   (project_id, order_no, product_id, batch_no, location_id,
+                    change_type, change_quantity, operator_name, created_at)
+                   VALUES (?, 'RK-OLD', 'H001', 'B1', ?, 'inbound', 8,
+                           '张三', '2026-01-02')""",
+                (project_id, location_id),
+            )
+            connection.execute(
+                """INSERT INTO templates
+                   (project_id, template_type, version, columns_json, status,
+                    updated_at)
+                   VALUES (?, 'inbound', 7, '[]', 'active', '2026-01-01')""",
+                (project_id,),
+            )
+            connection.commit()
+            connection.close()
+
+            db.init_db(path)
+            migrated = db.connect(path)
+            for table, marker in (
+                ("stock_orders", "'move'"),
+                ("stock_logs", "'move_out'"),
+                ("templates", "'move'"),
+            ):
+                sql = migrated.execute(
+                    "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?",
+                    (table,),
+                ).fetchone()[0]
+                self.assertIn(marker, sql)
+            columns = {
+                row[1] for row in migrated.execute("PRAGMA table_info(stock_order_items)")
+            }
+            self.assertIn("to_location_id", columns)
+            order = migrated.execute(
+                "SELECT order_no, order_type, status FROM stock_orders"
+            ).fetchone()
+            self.assertEqual(tuple(order), ("RK-OLD", "inbound", "completed"))
+            item = migrated.execute(
+                "SELECT product_id, quantity FROM stock_order_items"
+            ).fetchone()
+            self.assertEqual(tuple(item), ("H001", 8))
+            log = migrated.execute(
+                "SELECT change_type, change_quantity FROM stock_logs"
+            ).fetchone()
+            self.assertEqual(tuple(log), ("inbound", 8))
+            template = migrated.execute(
+                "SELECT version, columns_json FROM templates WHERE template_type = 'inbound'"
+            ).fetchone()
+            self.assertEqual(tuple(template), (7, "[]"))
+            self.assertEqual(migrated.execute(
+                "SELECT COUNT(*) FROM templates WHERE template_type = 'move'"
+            ).fetchone()[0], 1)
+            self.assertEqual(
+                migrated.execute("PRAGMA foreign_key_check").fetchall(), []
+            )
+            # 迁移后的库可写入移库单据与双向流水
+            migrated.execute(
+                """INSERT INTO stock_orders
+                   (project_id, order_no, order_type, status, operator_id,
+                    operator_name, template_version, created_at)
+                   VALUES (?, 'MV-NEW', 'move', 'completed', ?, '张三', 1,
+                           datetime('now'))""",
+                (project_id, admin_id),
+            )
+            for change_type, quantity in (("move_out", -2), ("move_in", 2)):
+                migrated.execute(
+                    """INSERT INTO stock_logs
+                       (project_id, order_no, product_id, batch_no, location_id,
+                        change_type, change_quantity, operator_name, created_at)
+                       VALUES (?, 'MV-NEW', 'H001', 'B1', ?, ?, ?, '张三',
+                               datetime('now'))""",
+                    (project_id, location_id, change_type, quantity),
+                )
+            migrated.commit()
             migrated.close()
 
 

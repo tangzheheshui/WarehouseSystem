@@ -28,6 +28,8 @@ FIELD_TYPES = {
     "storage_area": "text",
     "cargo_area": "text",
     "location_name": "text",
+    "from_location": "text",
+    "to_location": "text",
     "quality_status": "text",
     "purchase_order_no": "text",
     "note": "text",
@@ -38,6 +40,10 @@ REQUIRED_FIELDS = {
         "production_date", "quantity", "unit", "location_name",
     },
     "outbound": {"order_no", "order_date", "product_code", "quantity", "unit"},
+    "move": {
+        "order_no", "order_date", "product_code", "batch_no", "quantity",
+        "unit", "from_location", "to_location",
+    },
 }
 MAX_IMPORT_ROWS = 500
 MAX_FILE_SIZE = 5 * 1024 * 1024
@@ -808,6 +814,8 @@ def template_workbook(connection, order_type, project_id):
         "storage_area": "A库区",
         "cargo_area": "A货区",
         "location_name": "A-01-01",
+        "from_location": "A-01-01",
+        "to_location": "A-01-02",
         "quality_status": "良品",
         "purchase_order_no": "PO001",
         "recipient": "示例收货方",
@@ -1014,6 +1022,25 @@ def _validate_items(connection, project_id, order_type, items):
                        "货位不唯一，请使用 货区/货位 格式填写")
             else:
                 item["location_id"] = location["id"]
+        if order_type == "move":
+            for field, column_label, attr in (
+                ("from_location", "源货位", "from_location_id"),
+                ("to_location", "目标货位", "to_location_id"),
+            ):
+                location = _resolve_location(
+                    connection, project, item.get(field)
+                )
+                if location is None:
+                    _error(errors, row_no, column_label,
+                           f"{column_label}在项目仓库/库区内不存在")
+                elif location == "ambiguous":
+                    _error(errors, row_no, column_label,
+                           f"{column_label}不唯一，请使用 货区/货位 格式填写")
+                else:
+                    item[attr] = location["id"]
+            if (item.get("from_location_id")
+                    and item.get("from_location_id") == item.get("to_location_id")):
+                _error(errors, row_no, "目标货位", "源货位与目标货位不能相同")
     if errors:
         raise ImportValidationError("校验失败", errors)
     return products
@@ -1109,6 +1136,40 @@ def create_manual_outbound(connection, operator, project_id, values):
     })
 
 
+def _manual_move(values):
+    item = {"_row": 1}
+    item["order_no"] = _required_text(values.get("orderNo"), "移库单号", 60)
+    item["order_date"] = _manual_date(values.get("orderDate"), "移库日期")
+    if not item["order_date"]:
+        raise ValueError("移库日期不能为空")
+    item["product_code"] = _required_text(values.get("productCode"), "货品编号", 50)
+    item["batch_no"] = _required_text(values.get("batchNo"), "生产批号", 100)
+    item["quantity"] = _optional_int(values.get("quantity"), "数量")
+    if item["quantity"] is None or item["quantity"] <= 0:
+        raise ValueError("数量必须为正整数")
+    item["unit"] = _required_text(values.get("unit"), "单位", 20)
+    item["from_location"] = _required_text(
+        values.get("fromLocation"), "源货位", 100
+    )
+    item["to_location"] = _required_text(
+        values.get("toLocation"), "目标货位", 100
+    )
+    item["note"] = str(values.get("note") or "").strip() or None
+    return item
+
+
+def create_manual_move(connection, operator, project_id, values):
+    require_project(connection, operator, project_id)
+    item = _manual_move(values)
+    return create_move(connection, operator, project_id, {
+        "version": get_template(connection, "move", project_id)["version"],
+        "rows": [item],
+        "products": _validate_items(
+            connection, project_id, "move", [item]
+        ),
+    })
+
+
 def _next_number(connection, kind, prefix):
     now = datetime.now(timezone(timedelta(hours=8)))
     day = now.strftime("%Y%m%d")
@@ -1181,6 +1242,10 @@ def _order_json(connection, order_id):
     for item in items:
         value = dict(item)
         value["location"] = _location_json(connection, item["location_id"])
+        value["toLocation"] = (
+            _location_json(connection, item["to_location_id"])
+            if item["to_location_id"] else None
+        )
         result["items"].append(value)
     for item in picking_items:
         value = dict(item)
@@ -1345,6 +1410,12 @@ def import_outbound(connection, operator, project_id, data):
     require_project(connection, operator, project_id)
     parsed = parse_import(connection, project_id, data, "outbound")
     return create_outbound(connection, operator, project_id, parsed)
+
+
+def import_move(connection, operator, project_id, data):
+    require_project(connection, operator, project_id)
+    parsed = parse_import(connection, project_id, data, "move")
+    return create_move(connection, operator, project_id, parsed)
 
 
 def create_outbound(connection, operator, project_id, parsed):
@@ -1529,12 +1600,186 @@ def create_outbound(connection, operator, project_id, parsed):
     except Exception:
         connection.rollback()
         raise
+
+
+def create_move(connection, operator, project_id, parsed):
+    """移库：一步生效，源货位扣减、目标货位增加，整单原子。
+
+    事务内按分组顺序「校验+落库」交错执行，同文件链式移库（A→B、B→C）
+    可见前序分组的写入；任一行校验失败则整单回滚。
+    """
+    now = iso_now()
+    rows = parsed["rows"]
+    order_no = _single_order_no(
+        {item.get("order_no") for item in rows}, parsed, "移库单号"
+    )
+    if connection.execute(
+        "SELECT 1 FROM stock_orders WHERE order_no = ?", (order_no,)
+    ).fetchone():
+        raise ValueError("移库单号已存在")
+    grouped = {}
+    for item in rows:
+        key = (item["product_code"], item["batch_no"],
+               item["from_location_id"], item["to_location_id"])
+        if key not in grouped:
+            grouped[key] = {"quantity": 0, "_row": item["_row"]}
+        grouped[key]["quantity"] += item["quantity"]
+    lot_fields = (
+        ("production_date", "生产日期"),
+        ("expiry_date", "到期日期"),
+        ("inbound_date", "入库日"),
+        ("quality_status", "品质标记"),
+        ("purchase_order_no", "采购单号"),
+    )
+    try:
+        connection.execute("BEGIN IMMEDIATE")
+        order_date = next(
+            (item.get("order_date") for item in rows if item.get("order_date")), None
+        )
+        note = next(
+            (item.get("note") for item in rows if item.get("note")), ""
+        )
+        cursor = connection.execute(
+            """INSERT INTO stock_orders
+               (project_id, order_no, order_type, status, operator_id,
+                operator_name, template_version, note, order_date, created_at,
+                completed_at)
+               VALUES (?, ?, 'move', 'completed', ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                project_id, order_no, operator["id"], operator["display_name"],
+                parsed["version"], note, order_date, now, now,
+            ),
+        )
+        order_id = cursor.lastrowid
+        for item in rows:
+            product = parsed["products"][item["product_code"]]
+            connection.execute(
+                """INSERT INTO stock_order_items
+                   (order_id, row_no, product_id, product_name, spec, batch_no,
+                    location_id, to_location_id, quantity, note, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    order_id, item["_row"], item["product_code"],
+                    item["product_name"], item.get("spec") or product["spec"],
+                    item["batch_no"], item["from_location_id"],
+                    item["to_location_id"], item["quantity"],
+                    item.get("note"), now,
+                ),
+            )
+
+        errors = []
+        for key, group in grouped.items():
+            code, batch_no, from_id, to_id = key
+            row_no = group["_row"]
+            quantity = group["quantity"]
+            source = connection.execute(
+                """SELECT * FROM inventory
+                   WHERE project_id = ? AND product_id = ?
+                     AND location_id = ? AND batch_no = ?""",
+                (project_id, code, from_id, batch_no),
+            ).fetchone()
+            if not source:
+                _error(errors, row_no, "源货位", "源货位无该商品批次的库存，无法移库")
+                continue
+            available = (
+                source["total_quantity"] - source["picking_reserved"]
+                - source["moving_reserved"]
+            )
+            if available < quantity:
+                _error(errors, row_no, "数量",
+                       f"源货位当前可用库存为{available}件，"
+                       f"移库数量{quantity}件，库存不足无法移库")
+                continue
+            target = connection.execute(
+                """SELECT * FROM inventory
+                   WHERE project_id = ? AND product_id = ?
+                     AND location_id = ? AND batch_no = ?""",
+                (project_id, code, to_id, batch_no),
+            ).fetchone()
+            if target is not None:
+                mismatched = next(
+                    (label for field, label in lot_fields
+                     if (target[field] or None) != (source[field] or None)),
+                    None,
+                )
+                if mismatched:
+                    _error(errors, row_no, "目标货位",
+                           f"目标货位已存在同一商品、批次的库存，"
+                           f"但{mismatched}与源批次信息不一致，无法合并")
+                    continue
+                connection.execute(
+                    """UPDATE inventory SET total_quantity = total_quantity + ?,
+                       updated_at = ? WHERE id = ?""",
+                    (quantity, now, target["id"]),
+                )
+            else:
+                connection.execute(
+                    """INSERT INTO inventory
+                       (project_id, product_id, location_id, batch_no,
+                        production_date, expiry_date, inbound_date,
+                        total_quantity, picking_reserved, moving_reserved,
+                        quality_status, prohibit_outbound, purchase_order_no,
+                        last_inbound_at, created_at, updated_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?, ?, ?, ?, ?)""",
+                    (
+                        project_id, code, to_id, batch_no,
+                        source["production_date"], source["expiry_date"],
+                        source["inbound_date"], quantity,
+                        source["quality_status"], source["prohibit_outbound"],
+                        source["purchase_order_no"], source["last_inbound_at"],
+                        now, now,
+                    ),
+                )
+            connection.execute(
+                """UPDATE inventory SET total_quantity = total_quantity - ?,
+                   updated_at = ? WHERE id = ?""",
+                (quantity, now, source["id"]),
+            )
+            for location_id, change_type, change_quantity in (
+                (from_id, "move_out", -quantity),
+                (to_id, "move_in", quantity),
+            ):
+                connection.execute(
+                    """INSERT INTO stock_logs
+                       (project_id, order_no, product_id, batch_no, location_id,
+                        change_type, change_quantity, operator_name, created_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (
+                        project_id, order_no, code, batch_no, location_id,
+                        change_type, change_quantity,
+                        operator["display_name"], now,
+                    ),
+                )
+        if errors:
+            raise ImportValidationError("移库校验失败", errors)
+        audit(
+            connection, operator, "stock.move",
+            f"创建移库单 {order_no}", project_id,
+        )
+        connection.commit()
+        result = _order_json(connection, order_id)
+        result["aggregated"] = [
+            {
+                "productCode": key[0],
+                "batchNo": key[1],
+                "from": _location_json(connection, key[2])["full_name"],
+                "to": _location_json(connection, key[3])["full_name"],
+                "quantity": value["quantity"],
+            }
+            for key, value in grouped.items()
+        ]
+        return result
+    except Exception:
+        connection.rollback()
+        raise
+
+
 def list_orders(connection, user, project_id, order_type=None, keyword=None,
                 operator_name=None, start_date=None, end_date=None):
     require_project(connection, user, project_id)
     sql = "SELECT * FROM stock_orders WHERE project_id = ?"
     params = [project_id]
-    if order_type in ("inbound", "outbound", "history_import"):
+    if order_type in ("inbound", "outbound", "history_import", "move"):
         sql += " AND order_type = ?"
         params.append(order_type)
     if keyword:
