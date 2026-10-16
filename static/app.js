@@ -21,6 +21,7 @@ const state = {
   templates: [],
   editingProduct: null,
   editingProject: null,
+  productProjectId: null,
   editingUser: null,
   historyProjectId: null,
   inventoryOptions: null,
@@ -44,9 +45,8 @@ const titles = {
   move: "移库管理",
   inventory: "库存查询",
   picking: "拣货单",
-  products: "商品信息",
   warehouses: "仓库信息",
-  projects: "项目管理",
+  projects: "项目信息",
   users: "用户管理",
   settings: "系统设置",
   templates: "模板管理",
@@ -56,9 +56,8 @@ const titles = {
 
 const adminPages = [
   { id: "dashboard", label: "工作台", group: "总览", tone: "blue" },
-  { id: "products", label: "商品信息", group: "主数据", tone: "violet" },
   { id: "warehouses", label: "仓库信息", group: "主数据", tone: "violet" },
-  { id: "projects", label: "项目管理", group: "配置权限", tone: "teal" },
+  { id: "projects", label: "项目信息", group: "配置权限", tone: "teal" },
   { id: "users", label: "用户管理", group: "配置权限", tone: "teal" },
   { id: "settings", label: "系统设置", group: "配置权限", tone: "slate" },
 ];
@@ -217,7 +216,11 @@ function renderNav() {
     </div>
   `).join("");
   nav.querySelectorAll("button").forEach(button => {
-    button.onclick = () => location.hash = `#${button.dataset.page}`;
+    button.onclick = () => {
+      // 离开项目信息页时退出商品管理视图，下次进入回到项目列表
+      if (button.dataset.page !== "projects") state.productProjectId = null;
+      location.hash = `#${button.dataset.page}`;
+    };
   });
   document.getElementById("userName").textContent = state.user.displayName;
   document.getElementById("userRole").textContent = state.user.role === "admin"
@@ -1224,12 +1227,22 @@ function printPicking(detail) {
   window.print();
 }
 
-async function renderProducts() {
+// 商品归属项目：在公司级页面删除独立商品页，改为项目详情内管理
+async function renderProjectProducts() {
+  const project = state.projects.find(
+    item => String(item.id) === String(state.productProjectId),
+  );
+  if (!project) {
+    state.productProjectId = null;
+    return renderProjects();
+  }
   const editing = state.editingProduct;
   document.getElementById("page").innerHTML = `
     <div class="panel">
-      <div class="panel-header"><h3>${editing ? "修改商品" : "录入商品"}</h3>
-        ${editing ? `<button class="btn" id="cancelProduct">取消修改</button>` : ""}</div>
+      <div class="panel-header">
+        <h3>「${esc(project.project_name)}」商品管理</h3>
+        <button class="btn" id="backToProjects" type="button">返回项目列表</button>
+      </div>
       <form id="productForm" class="fields-row wide">
         <label>货品编号<input name="productCode" required ${editing ? "readonly" : ""}></label>
         <label>货品名称<input name="productName" required></label>
@@ -1239,8 +1252,8 @@ async function renderProducts() {
         <label>单件重量<input name="unitWeight" type="number" min="0" step="any"></label>
         <label>体积<input name="volume" type="number" min="0" step="any"></label>
         <label>保质天数<input name="shelfLifeDays" type="number" min="1" step="1"></label>
-        <label>状态<select name="status"><option value="active">启用</option>
-          <option value="disabled">停用</option></select></label>
+        ${editing ? `<label>状态<select name="status"><option value="active">启用</option>
+          <option value="disabled">停用</option></select></label>` : ""}
         <button class="btn primary" type="submit">${editing ? "保存" : "创建"}</button>
       </form>
     </div>
@@ -1249,6 +1262,11 @@ async function renderProducts() {
         <button class="btn" type="submit">查询</button></form>
       <div id="productTable" class="table-top"></div>
     </div>`;
+  document.getElementById("backToProjects").onclick = () => {
+    state.productProjectId = null;
+    state.editingProduct = null;
+    renderProjects();
+  };
   if (editing) {
     const form = document.getElementById("productForm");
     form.productCode.value = editing.product_id;
@@ -1260,10 +1278,6 @@ async function renderProducts() {
     form.volume.value = editing.volume ?? "";
     form.shelfLifeDays.value = editing.shelf_life_days ?? "";
     form.status.value = editing.status;
-    document.getElementById("cancelProduct").onclick = () => {
-      state.editingProduct = null;
-      renderProducts();
-    };
   }
   document.getElementById("productForm").onsubmit = async event => {
     event.preventDefault();
@@ -1272,7 +1286,7 @@ async function renderProducts() {
       if (data[key] !== "") data[key] = Number(data[key]);
     });
     try {
-      if (state.editingProduct) {
+      if (editing) {
         await api(`products/${encodeURIComponent(data.productCode)}`, {
           method: "PUT",
           body: {
@@ -1283,23 +1297,27 @@ async function renderProducts() {
           },
         });
       } else {
-        await api("products", { method: "POST", body: data });
+        await api("products", {
+          method: "POST",
+          body: { ...data, projectId: project.id },
+        });
       }
       state.editingProduct = null;
       toast("商品已保存");
-      await renderProducts();
+      await renderProjectProducts();
     } catch (error) { toast(error.message, true); }
   };
   document.getElementById("productFilter").onsubmit = event => {
     event.preventDefault();
-    loadProducts(new FormData(event.target));
+    loadProjectProducts(project, new FormData(event.target));
   };
-  await loadProducts(new FormData(document.getElementById("productFilter")));
+  await loadProjectProducts(project, new FormData(document.getElementById("productFilter")));
 }
 
-async function loadProducts(form = new FormData()) {
-  const query = new URLSearchParams(form).toString();
-  const rows = await api(`products${query ? `?${query}` : ""}`);
+async function loadProjectProducts(project, form = new FormData()) {
+  const params = new URLSearchParams(form);
+  params.set("projectId", project.id);
+  const rows = await api(`products?${params.toString()}`);
   document.getElementById("productTable").innerHTML = simpleTable(
     ["货品编号", "货品名称", "分类", "规格", "单位", "重量", "体积", "保质天数", "状态", "操作"],
     rows.map(row => [
@@ -1313,98 +1331,642 @@ async function loadProducts(form = new FormData()) {
   document.querySelectorAll("#productTable button[data-id]").forEach(button => {
     button.onclick = () => {
       state.editingProduct = rows.find(row => row.product_id === button.dataset.id);
-      renderProducts();
+      renderProjectProducts();
     };
   });
 }
 
+// ---- 仓库信息：仓库→库区→货区→货位 自上而下级联管理 ----
 async function renderWarehouses() {
   const warehouses = await api("warehouses");
-  document.getElementById("page").innerHTML = `
-    <div class="panel">
-      <h3>新增仓库</h3>
-      <form id="warehouseForm" class="fields-row wide">
-        <label>仓库名称<input name="warehouseName" required></label>
-        <label>地址<input name="address"></label>
-        <label>联系人<input name="contactName"></label>
-        <label>联系电话<input name="contactPhone"></label>
-        <button class="btn primary" type="submit">创建</button>
-      </form>
-    </div>
-    <div class="panel">
-      <h3>新增货位</h3>
-      <form id="locationForm" class="fields-row wide">
-        <label>仓库<select name="warehouseId" required>${warehouses.map(item =>
-          `<option value="${item.id}">${esc(item.warehouse_name)}</option>`).join("")}</select></label>
-        <label>库区<input name="storageArea" required></label>
-        <label>货区<input name="cargoArea" required></label>
-        <label>货位<input name="locationName" required></label>
-        <button class="btn primary" type="submit">创建</button>
-      </form>
-    </div>
-    <div class="panel"><h3>仓库与货位</h3><div id="warehouseTable"></div></div>`;
-  document.getElementById("warehouseForm").onsubmit = async event => {
-    event.preventDefault();
-    try {
-      await api("warehouses", {
-        method: "POST", body: Object.fromEntries(new FormData(event.target)),
-      });
-      toast("仓库已创建");
-      await renderWarehouses();
-    } catch (error) { toast(error.message, true); }
-  };
-  document.getElementById("locationForm").onsubmit = async event => {
-    event.preventDefault();
-    try {
-      await api("warehouse-locations", {
-        method: "POST", body: Object.fromEntries(new FormData(event.target)),
-      });
-      toast("货位已创建");
-      await renderWarehouses();
-    } catch (error) { toast(error.message, true); }
-  };
-  const rows = [];
-  for (const warehouse of warehouses) {
-    rows.push([
-      `<strong>${esc(warehouse.warehouse_name)}</strong>`, esc(warehouse.address || "-"),
-      esc(warehouse.contact_name || "-"), esc(warehouse.contact_phone || "-"),
-      setStatus(warehouse.status),
-      `<button class="btn small" data-type="warehouses" data-id="${warehouse.id}"
-        data-status="${warehouse.status === "active" ? "disabled" : "active"}">
-        ${warehouse.status === "active" ? "停用" : "启用"}</button>`,
-    ]);
-    for (const location of warehouse.locations) {
-      rows.push([
-        `<span class="muted">${esc(location.storage_area)} / ${esc(location.cargo_area)} / ${esc(location.location_name)}</span>`,
-        "-", "-", "-", setStatus(location.status),
-        `<button class="btn small" data-type="warehouse_locations" data-id="${location.id}"
-          data-status="${location.status === "active" ? "disabled" : "active"}">
-          ${location.status === "active" ? "停用" : "启用"}</button>`,
-      ]);
-    }
+  state.whCache = warehouses;
+  state.whChecked = state.whChecked || new Set();
+  if (!state.whSel || !warehouses.some(item => item.id === state.whSel.whId)) {
+    state.whSel = {
+      whId: warehouses[0]?.id,
+      area: warehouses[0]?.areas[0]?.name || null,
+      cargo: null,
+    };
   }
-  document.getElementById("warehouseTable").innerHTML = simpleTable(
-    ["仓库 / 货位", "地址", "联系人", "联系电话", "状态", "操作"], rows,
-  );
-  document.querySelectorAll("#warehouseTable button[data-type]").forEach(button => {
-    button.onclick = async () => {
-      try {
-        await api(`${button.dataset.type}/${button.dataset.id}/status`, {
-          method: "POST", body: { status: button.dataset.status },
+  renderWhPage();
+}
+
+function curWh() { return state.whCache.find(item => item.id === state.whSel.whId); }
+function curArea(wh = curWh()) {
+  return wh?.areas.find(area => area.name === state.whSel.area);
+}
+function curCargo(wh = curWh()) {
+  if (!state.whSel.cargo) return null;
+  return wh?.cargoAreas.find(cargo =>
+    cargo.storage_area_id === curArea(wh)?.id && cargo.name === state.whSel.cargo);
+}
+function whLocs(wh, areaName = null, cargoName = null) {
+  return wh.locations.filter(loc =>
+    (!areaName || loc.storage_area === areaName)
+    && (!cargoName || loc.cargo_area === cargoName));
+}
+
+function renderWhPage() {
+  const wh = curWh();
+  if (!wh) {
+    document.getElementById("page").innerHTML = `
+      <div class="panel"><div class="empty" style="padding:40px;text-align:center;color:var(--muted)">
+        还没有仓库
+        <div style="margin-top:12px">
+          <button class="btn primary" onclick="openWarehouseForm()">＋ 新增仓库</button>
+        </div>
+      </div></div>`;
+    return;
+  }
+  const whStock = wh.locations.filter(loc =>
+    loc.stock_quantity > 0 && loc.status === "active").length;
+  const cargoList = wh.cargoAreas.filter(c => c.storage_area_id === curArea(wh)?.id);
+  const locs = whLocs(wh, state.whSel.area, state.whSel.cargo);
+  const keyword = (state.whKeyword || "").trim().toUpperCase();
+  const shownLocs = keyword
+    ? locs.filter(loc => loc.location_name.toUpperCase().includes(keyword))
+    : locs;
+  const showCargoCol = !state.whSel.cargo;
+
+  document.getElementById("page").innerHTML = `
+    <div class="panel wh-cascade">
+      <div class="wh-row">
+        <span class="wh-row-label">仓库</span>
+        <span class="wh-chipbar">${state.whCache.map(item => `
+          <span class="wh-chip ${item.id === wh.id ? "active" : ""}"
+            onclick="selectWhNode(${item.id})">${esc(item.warehouse_name)}</span>`).join("")}
+        </span>
+        <span class="wh-row-actions">
+          <button class="btn" onclick="openWarehouseForm(${wh.id})">修改仓库</button>
+          <button class="btn outline-danger" onclick="toggleWarehouseStatus(${wh.id})">
+            ${wh.status === "active" ? "停用" : "启用"}</button>
+          <button class="btn primary" onclick="openWarehouseForm()">＋ 新仓库</button>
+        </span>
+        <span class="wh-row-sub">${esc(wh.address || "无地址")} · 联系人 ${esc(wh.contact_name || "-")} / ${esc(wh.contact_phone || "-")}
+          · ${wh.areas.length} 个库区 · ${wh.locations.length} 个货位${whStock ? ` · ${whStock} 个有货` : ""}</span>
+      </div>
+
+      <div class="wh-row">
+        <span class="wh-row-label">库区</span>
+        <span class="wh-chipbar" id="whAreaChips">${wh.areas.map(area => `
+          <span class="wh-chip ${state.whSel.area === area.name ? "active" : ""}"
+            onclick="selectWhArea(${wh.id}, '${esc(area.name)}')">${esc(area.name)}</span>`).join("")}
+        </span>
+        <span class="wh-row-actions">
+          <button class="btn primary" onclick="whInlineCreate('area')">＋ 建库区</button>
+          <button class="btn" onclick="openRenameForm('area')">改名</button>
+          <button class="btn outline-danger" onclick="deleteArea(${curArea(wh)?.id ?? 0})"
+            ${state.whSel.area ? "" : "disabled"}>删除</button>
+        </span>
+      </div>
+
+      <div class="wh-row">
+        <span class="wh-row-label">货区</span>
+        <span class="wh-chipbar" id="whCargoChips">
+          <span class="wh-chip ${!state.whSel.cargo ? "active" : ""}"
+            onclick="selectWhCargoAll()">全部</span>
+          ${cargoList.map(cargo => `
+            <span class="wh-chip ${state.whSel.cargo === cargo.name ? "active" : ""}"
+              onclick="selectWhCargo(${wh.id}, '${esc(state.whSel.area)}', '${esc(cargo.name)}')">${esc(cargo.name)}</span>`).join("")}
+        </span>
+        <span class="wh-row-actions">
+          <button class="btn primary" onclick="whInlineCreate('cargo')">＋ 建货区</button>
+          ${state.whSel.cargo ? `
+            <button class="btn" onclick="openRenameForm('cargo')">改名</button>
+            <button class="btn outline-danger" onclick="deleteCargo(${curCargo(wh).id})">删除</button>` : ""}
+        </span>
+      </div>
+
+      <div class="wh-row">
+        <span class="wh-row-label">货位</span>
+        <input class="input" style="width:260px" placeholder="搜索货位号…"
+          value="${esc(state.whKeyword || "")}" oninput="whSearch(this.value)">
+        <span class="form-hint">${shownLocs.length} 个货位 · ${
+          shownLocs.filter(loc => loc.stock_quantity > 0 && loc.status === "active").length} 个有货</span>
+        <span class="wh-row-actions">
+          <button class="btn dashed" onclick="openGenForm('${esc(state.whSel.area || "")}', '${esc(state.whSel.cargo || "")}')">范围生成</button>
+          <button class="btn primary" onclick="openLocForm('${esc(state.whSel.area || "")}', '${esc(state.whSel.cargo || "")}')">＋ 建货位</button>
+        </span>
+      </div>
+
+      ${whLocTable(shownLocs, showCargoCol)}
+      <div id="whBatchSlot"></div>
+    </div>`;
+  renderWhBatchBar();
+}
+
+function whSearch(value) {
+  state.whKeyword = value;
+  const table = whLocTable(
+    (() => {
+      const wh = curWh();
+      const locs = whLocs(wh, state.whSel.area, state.whSel.cargo);
+      const kw = value.trim().toUpperCase();
+      return kw ? locs.filter(loc => loc.location_name.toUpperCase().includes(kw)) : locs;
+    })(), !state.whSel.cargo);
+  const old = document.querySelector(".wh-cascade .table-wrap");
+  if (old) old.outerHTML = table;
+}
+
+/* 行内新建库区/货区：点「＋」原位变输入框，回车保存 */
+function whInlineCreate(type) {
+  if (type === "cargo" && !curArea()) {
+    toast("请先创建库区,再在库区下建货区", true);
+    return;
+  }
+  const bar = type === "area"
+    ? document.getElementById("whAreaChips") : document.getElementById("whCargoChips");
+  if (bar.querySelector(".wh-inline-box")) return;
+  const box = document.createElement("span");
+  box.className = "wh-inline-box";
+  box.innerHTML = `
+    <input class="input" style="width:130px" placeholder="${type === "area" ? "库区名" : "货区名"}">
+    <button class="btn small primary">存</button>`;
+  bar.appendChild(box);
+  const input = box.querySelector("input");
+  input.focus();
+  const save = async () => {
+    const name = input.value.trim();
+    if (!name) { box.remove(); return; }
+    try {
+      if (type === "area") {
+        await api(`warehouses/${state.whSel.whId}/areas`, {
+          method: "POST", body: { name },
         });
-        toast("状态已更新");
-        await renderWarehouses();
-      } catch (error) { toast(error.message, true); }
+        state.whSel.area = name;
+      } else {
+        await api(`areas/${curArea().id}/cargo-areas`, {
+          method: "POST", body: { name },
+        });
+        state.whSel.cargo = name;
+      }
+      renderWhPage();
+      toast(`${type === "area" ? "库区" : "货区"}「${name}」已创建`);
+    } catch (error) { toast(error.message, true); }
+  };
+  box.querySelector("button").onclick = save;
+  input.onkeydown = event => {
+    if (event.key === "Enter") save();
+    if (event.key === "Escape") box.remove();
+  };
+}
+
+function selectWhNode(id) {
+  const wh = state.whCache.find(item => item.id === id);
+  state.whSel = { whId: id, area: wh.areas[0]?.name || null, cargo: null };
+  state.whChecked.clear(); state.whKeyword = "";
+  renderWhPage();
+}
+function selectWhArea(id, area) {
+  if (state.whSel.area === area) return;
+  state.whSel = { whId: id, area, cargo: null };
+  state.whChecked.clear(); state.whKeyword = "";
+  renderWhPage();
+}
+function selectWhCargo(id, area, cargo) {
+  state.whSel.cargo = cargo;
+  state.whChecked.clear(); state.whKeyword = "";
+  renderWhPage();
+}
+function selectWhCargoAll() {
+  state.whSel.cargo = null;
+  state.whChecked.clear(); state.whKeyword = "";
+  renderWhPage();
+}
+
+function whLocTable(locs, withCargoCol) {
+  const checked = state.whChecked;
+  const allOn = locs.filter(loc => loc.status === "active");
+  const colN = 4 + (withCargoCol ? 1 : 0);
+  return `
+    <div class="table-wrap"><table>
+      <thead><tr>
+        <th class="center" style="width:40px"><input type="checkbox" ${allOn.length && allOn.every(loc => checked.has(loc.id)) ? "checked" : ""}
+          onchange="whToggleAll(this.checked)"></th>
+        <th>货位</th>
+        ${withCargoCol ? "<th>所属货区</th>" : ""}
+        <th>状态</th><th>库存</th><th style="width:120px">操作</th>
+      </tr></thead>
+      <tbody>${locs.length ? locs.map(loc => `
+        <tr>
+          <td class="center">${loc.status === "active"
+            ? `<input type="checkbox" ${checked.has(loc.id) ? "checked" : ""}
+              onchange="whCheck(${loc.id}, this.checked)">` : ""}</td>
+          <td><b>${esc(loc.location_name)}</b></td>
+          ${withCargoCol ? `<td>${esc(loc.cargo_area)}</td>` : ""}
+          <td>${setStatus(loc.status)}</td>
+          <td>${loc.stock_quantity > 0 ? `${loc.stock_quantity} 件` : '<span class="muted">-</span>'}</td>
+          <td>
+            <a class="link-act" onclick="whDisableOne(${loc.id})">${loc.status === "active" ? "停用" : "启用"}</a>
+            <a class="link-act danger" onclick="whDeleteOne(${loc.id})">删除</a>
+          </td>
+        </tr>`).join("") : `<tr><td colspan="${colN}" class="empty">该货区还没有货位</td></tr>`}
+      </tbody></table></div>`;
+}
+
+function whToggleAll(on) {
+  const wh = curWh();
+  const locs = state.whSel.cargo
+    ? whLocs(wh, state.whSel.area, state.whSel.cargo)
+    : whLocs(wh, state.whSel.area);
+  locs.filter(loc => loc.status === "active")
+    .forEach(loc => on ? whCheckedAdd(loc.id) : state.whChecked.delete(loc.id));
+  renderWhPage();
+}
+function whCheckedAdd(id) { state.whChecked.add(id); renderWhBatchBar(); }
+function whCheck(id, on) {
+  on ? state.whChecked.add(id) : state.whChecked.delete(id);
+  renderWhBatchBar();
+}
+function renderWhBatchBar() {
+  const slot = document.getElementById("whBatchSlot");
+  if (!slot) return;
+  const wh = curWh();
+  const picked = wh.locations.filter(loc => state.whChecked.has(loc.id));
+  if (!picked.length) { slot.innerHTML = ""; return; }
+  const withStock = picked.filter(loc => loc.stock_quantity > 0 && loc.status === "active");
+  slot.innerHTML = `
+    <div class="wh-batchbar">
+      已选 ${picked.length} 个货位${withStock.length
+        ? `(其中 <b style="color:#ffd591">${withStock.length} 个有库存</b>)` : ""}
+      <span style="flex:1"></span>
+      <button class="btn small" onclick="whBatchStatus('active')">启用</button>
+      <button class="btn small danger" onclick="whBatchDisable()">停用</button>
+      <button class="btn small danger" onclick="whBatchDelete()">删除</button>
+      <button class="btn small" onclick="state.whChecked.clear();renderWhDetail()">取消选择</button>
+    </div>`;
+}
+
+function whConfirm(title, bodyHtml, buttons) {
+  showModal(title, bodyHtml, buttons.map((btn, idx) =>
+    `<button class="btn ${btn.danger ? "danger" : ""}" data-idx="${idx}"
+      ${btn.primary ? 'data-primary="1"' : ""}>${esc(btn.label)}</button>`).join(""));
+  document.querySelectorAll("#modalFoot .btn").forEach(node => {
+    node.onclick = () => {
+      closeModal();
+      buttons[Number(node.dataset.idx)].onClick?.();
     };
   });
+}
+
+/* 单个/批量停用共用:有库存弹确认,可仅停空货位 */
+async function applyDisable(targets, { clearChecked = false } = {}) {
+  for (const loc of targets) {
+    try {
+      await api(`warehouse-locations/${loc.id}/status`, {
+        method: "POST", body: { status: "disabled" },
+      });
+    } catch (error) { toast(`${loc.location_name}: ${error.message}`, true); }
+  }
+  if (clearChecked) state.whChecked.clear();
+  await renderWarehouses();
+  toast(`已停用 ${targets.length} 个货位`);
+}
+
+function whDisableOne(id) {
+  const wh = curWh();
+  const loc = wh.locations.find(item => item.id === id);
+  if (!loc) return;
+  if (loc.status === "disabled") {
+    applyEnable([loc]);
+    return;
+  }
+  const free = [];
+  const inUse = loc.stock_quantity > 0 ? [loc] : [];
+  if (inUse.length) {
+    confirmDisable(inUse, free, mode => {
+      applyDisable(mode === "free" ? free : pickedAll(inUse, free));
+    });
+  } else {
+    applyDisable([loc]);
+  }
+}
+function pickedAll(inUse, free) { return [...inUse, ...free]; }
+
+function applyEnable(targets) {
+  whBatchStatusTo(targets, "active", "已启用");
+}
+
+async function whBatchDisable() {
+  const wh = curWh();
+  const picked = wh.locations.filter(loc =>
+    state.whChecked.has(loc.id) && loc.status === "active");
+  if (!picked.length) { toast("请先勾选要停用的货位", true); return; }
+  const inUse = picked.filter(loc => loc.stock_quantity > 0);
+  const free = picked.filter(loc => !loc.stock_quantity);
+  const run = mode => {
+    const targets = mode === "free" ? free : picked;
+    applyDisable(targets, { clearChecked: true });
+  };
+  if (inUse.length) {
+    confirmDisable(inUse, free, run, picked.length);
+  } else {
+    run("all");
+  }
+}
+
+function confirmDisable(inUse, free, onConfirm, total) {
+  whConfirm("停用确认 — 有货位正在使用", `
+    <div class="wh-impact">
+      选中的货位中 <b>${inUse.length} 个有库存</b>(${inUse.map(loc =>
+      `${loc.location_name} ${loc.stock_quantity} 件`).join("、")}):
+    </div>
+    <p class="form-hint">停用后这些货位不能再收发货,库存不受影响,可随时重新启用。</p>
+    ${free.length ? `<p class="form-hint">另有 ${free.length} 个空货位将一并停用。</p>` : ""}`,
+    [
+      ...(free.length && inUse.length
+        ? [{ label: `仅停用空货位(${free.length})`, onClick: () => onConfirm("free") }]
+        : []),
+      { label: `全部停用(${total ?? pickedAll(inUse, free).length})`, danger: true,
+        onClick: () => onConfirm("all") },
+    ]);
+}
+
+async function whBatchStatusTo(targets, status, label) {
+  for (const loc of targets) {
+    try {
+      await api(`warehouse-locations/${loc.id}/status`, {
+        method: "POST", body: { status },
+      });
+    } catch (error) { toast(`${loc.location_name}: ${error.message}`, true); }
+  }
+  state.whChecked.clear();
+  await renderWarehouses();
+  toast(`${label} ${targets.length} 个货位`);
+}
+
+function whBatchEnable() {
+  const wh = curWh();
+  const picked = wh.locations.filter(loc =>
+    state.whChecked.has(loc.id) && loc.status === "disabled");
+  if (!picked.length) { toast("请先勾选要启用的货位(已启用的不在范围内)", true); return; }
+  whBatchStatusTo(picked, "active", "已启用");
+}
+
+function whDeleteOne(id) {
+  const wh = curWh();
+  const loc = wh.locations.find(item => item.id === id);
+  if (!loc) return;
+  if (loc.stock_quantity > 0) {
+    toast(`「${loc.location_name}」有 ${loc.stock_quantity} 件库存,不能删除,请改用停用`, true);
+    return;
+  }
+  whConfirm("删除确认",
+    `<p>确认删除货位 ${esc(loc.storage_area)} / ${esc(loc.cargo_area)} / <b>${esc(loc.location_name)}</b>?删除后不可恢复。</p>`,
+    [
+      { label: "取消" },
+      { label: "删除", danger: true, onClick: async () => {
+        try {
+          const result = await api("warehouse-locations/delete", {
+            method: "POST", body: { ids: [id] },
+          });
+          if (result.blocked.length) {
+            toast(result.blocked[0].reason, true);
+          } else {
+            toast("货位已删除");
+          }
+          await renderWarehouses();
+        } catch (error) { toast(error.message, true); }
+      } },
+    ]);
+}
+
+function whBatchDelete() {
+  const wh = curWh();
+  const picked = wh.locations.filter(loc => state.whChecked.has(loc.id));
+  if (!picked.length) { toast("请先勾选要删除的货位", true); return; }
+  const blocked = picked.filter(loc => loc.stock_quantity > 0);
+  if (blocked.length) {
+    toast(`有库存的货位不能删除(请先移出或改用停用):${
+      blocked.map(loc => loc.location_name).join("、")}`, true);
+    return;
+  }
+  whConfirm("删除确认", `<p>确认删除 ${picked.length} 个空货位?删除后不可恢复。</p>`, [
+    { label: "取消" },
+    { label: `删除(${picked.length})`, danger: true, onClick: async () => {
+      try {
+        const result = await api("warehouse-locations/delete", {
+          method: "POST", body: { ids: picked.map(loc => loc.id) },
+        });
+        state.whChecked.clear();
+        await renderWarehouses();
+        if (result.blocked.length) {
+          toast(`已删 ${result.deleted.length} 个;${result.blocked.length} 个未删(${
+            result.blocked.map(item => `${item.name || item.id}:${item.reason}`).join(";")})`, true);
+        } else {
+          toast(`已删除 ${result.deleted.length} 个货位`);
+        }
+      } catch (error) { toast(error.message, true); }
+    } },
+  ]);
+}
+
+async function toggleWarehouseStatus(id) {
+  const wh = state.whCache.find(item => item.id === id);
+  const next = wh.status === "active" ? "disabled" : "active";
+  if (next === "disabled") {
+    const stockN = wh.locations.filter(loc =>
+      loc.stock_quantity > 0 && loc.status === "active").length;
+    if (stockN && !confirm(`「${wh.warehouse_name}」还有 ${stockN} 个货位有库存,停用后相关项目将无法作业。确认停用?`)) return;
+  }
+  try {
+    await api(`warehouses/${id}/status`, { method: "POST", body: { status: next } });
+    toast(next === "active" ? "仓库已启用" : "仓库已停用");
+    await renderWarehouses();
+  } catch (error) { toast(error.message, true); }
+}
+
+function deleteArea(areaId) {
+  whConfirm("删除库区", `<p>确认删除该库区?仅能删除没有货位的空库区。</p>`, [
+    { label: "取消" },
+    { label: "删除", danger: true, onClick: async () => {
+      try {
+        await api(`areas/${areaId}`, { method: "DELETE" });
+        state.whSel.area = null; state.whSel.cargo = null;
+        await renderWarehouses();
+        toast("库区已删除");
+      } catch (error) { toast(error.message, true); }
+    } },
+  ]);
+}
+
+function deleteCargo(cargoId) {
+  whConfirm("删除货区", `<p>确认删除该货区?仅能删除没有货位的空货区。</p>`, [
+    { label: "取消" },
+    { label: "删除", danger: true, onClick: async () => {
+      try {
+        await api(`cargo-areas/${cargoId}`, { method: "DELETE" });
+        state.whSel.cargo = null;
+        await renderWarehouses();
+        toast("货区已删除");
+      } catch (error) { toast(error.message, true); }
+    } },
+  ]);
+}
+
+/* ---- 仓库页弹窗 ---- */
+function showModal(title, bodyHtml, footHtml) {
+  let host = document.getElementById("modalHost");
+  if (!host) {
+    host = document.createElement("div");
+    host.id = "modalHost";
+    host.className = "wh-mask";
+    document.body.appendChild(host);
+  }
+  host.innerHTML = `
+    <div class="wh-modal">
+      <div class="wh-modal-head"><span>${esc(title)}</span>
+        <button class="btn small" onclick="closeModal()">✕</button></div>
+      <div class="wh-modal-body">${bodyHtml}</div>
+      <div class="wh-modal-foot" id="modalFoot">${footHtml || ""}</div>
+    </div>`;
+  host.classList.remove("hidden");
+  host.onclick = event => { if (event.target === host) closeModal(); };
+}
+function closeModal() {
+  document.getElementById("modalHost")?.classList.add("hidden");
+}
+
+function openWarehouseForm(id) {
+  const wh = id ? state.whCache.find(item => item.id === id) : null;
+  showModal(wh ? "修改仓库" : "新增仓库", `
+    <div class="field"><label>仓库名称</label><input class="input" id="fWhName" value="${esc(wh?.warehouse_name || "")}"></div>
+    <div class="field"><label>地址</label><input class="input" id="fWhAddr" value="${esc(wh?.address || "")}"></div>
+    <div class="field" style="display:flex;gap:12px">
+      <div style="flex:1"><label>联系人</label><input class="input" id="fWhContact" value="${esc(wh?.contact_name || "")}"></div>
+      <div style="flex:1"><label>联系电话</label><input class="input" id="fWhPhone" value="${esc(wh?.contact_phone || "")}"></div>
+    </div>`,
+    `<button class="btn" onclick="closeModal()">取消</button>
+     <button class="btn primary" id="fWhSave">保存</button>`);
+  document.getElementById("fWhSave").onclick = async () => {
+    const body = {
+      warehouseName: fWhName.value.trim(), address: fWhAddr.value.trim(),
+      contactName: fWhContact.value.trim(), contactPhone: fWhPhone.value.trim(),
+    };
+    try {
+      if (wh) await api(`warehouses/${wh.id}`, { method: "PUT", body });
+      else await api("warehouses", { method: "POST", body });
+      closeModal();
+      if (!wh) state.whSel = null;
+      await renderWarehouses();
+      toast(wh ? "仓库已保存" : "仓库已创建");
+    } catch (error) { toast(error.message, true); }
+  };
+}
+
+function openRenameForm(mode) {
+  const wh = curWh();
+  const isArea = mode === "area";
+  showModal(isArea ? "库区改名" : "货区改名", `
+    <div class="field"><label>${isArea ? "新库区名" : "新货区名"}</label>
+      <input class="input" id="fRenameValue" value="${esc(isArea ? state.whSel.area : state.whSel.cargo)}"></div>
+    <p class="form-hint">改名会同步作用于该层下所有货位,出入库单据里的旧名称不再自动带出。</p>`,
+    `<button class="btn" onclick="closeModal()">取消</button>
+     <button class="btn primary" id="fRenameSave">确认改名</button>`);
+  document.getElementById("fRenameSave").onclick = async () => {
+    try {
+      if (isArea) await api(`areas/${curArea(wh).id}`, {
+        method: "PUT", body: { name: fRenameValue.value.trim() },
+      });
+      else await api(`cargo-areas/${curCargo(wh).id}`, {
+        method: "PUT", body: { name: fRenameValue.value.trim() },
+      });
+      closeModal();
+      await renderWarehouses();
+      toast("已改名,层级下货位同步更新");
+    } catch (error) { toast(error.message, true); }
+  };
+}
+
+function openLocForm(area = "", cargo = "") {
+  const wh = curWh();
+  area = area || state.whSel.area || "";
+  cargo = cargo || state.whSel.cargo || "";
+  showModal("建货位", `
+    <div class="field" style="display:flex;gap:12px">
+      <div style="flex:1"><label>库区(填新名自动建层)</label>
+        <input class="input" id="fLocArea" value="${esc(area)}"></div>
+      <div style="flex:1"><label>货区(填新名自动建层)</label>
+        <input class="input" id="fLocCargo" value="${esc(cargo)}"></div>
+    </div>
+    <div class="field"><label>货位</label>
+      <input class="input" id="fLocName" placeholder="例如 A-01"></div>`,
+    `<button class="btn" onclick="closeModal()">取消</button>
+     <button class="btn primary" id="fLocSave">创建</button>`);
+  document.getElementById("fLocSave").onclick = async () => {
+    try {
+      await api("warehouse-locations", {
+        method: "POST",
+        body: {
+          warehouseId: wh.id, storageArea: fLocArea.value.trim(),
+          cargoArea: fLocCargo.value.trim(), locationName: fLocName.value.trim(),
+        },
+      });
+      closeModal();
+      state.whSel.area = fLocArea.value.trim();
+      state.whSel.cargo = fLocCargo.value.trim();
+      await renderWarehouses();
+      toast("货位已创建");
+    } catch (error) { toast(error.message, true); }
+  };
+}
+
+function openGenForm(area = "", cargo = "") {
+  const wh = curWh();
+  area = area || state.whSel.area || "";
+  cargo = cargo || state.whSel.cargo || "";
+  showModal("范围生成货位", `
+    <div class="field" style="display:flex;gap:12px">
+      <div style="flex:1"><label>库区(填新名自动建层)</label>
+        <input class="input" id="fGenArea" value="${esc(area)}"></div>
+      <div style="flex:1"><label>货区(填新名自动建层)</label>
+        <input class="input" id="fGenCargo" value="${esc(cargo)}"></div>
+    </div>
+    <div class="field" style="display:flex;gap:12px">
+      <div style="flex:1"><label>货位前缀</label><input class="input" id="fGenPrefix" placeholder="例如 A-"></div>
+      <div style="flex:1"><label>起始号</label><input class="input" id="fGenStart" type="number" value="1"></div>
+      <div style="flex:1"><label>结束号</label><input class="input" id="fGenEnd" type="number" value="10"></div>
+    </div>
+    <p class="form-hint">按前缀+起止号批量生成,编号自动补零对齐;已存在的自动跳过。</p>
+    <div id="fGenResult"></div>`,
+    `<button class="btn" onclick="closeModal()">关闭</button>
+     <button class="btn primary" id="fGenSave">生成</button>`);
+  document.getElementById("fGenSave").onclick = async () => {
+    const prefix = fGenPrefix.value.trim();
+    const start = Number(fGenStart.value), end = Number(fGenEnd.value);
+    if (!fGenArea.value.trim() || !fGenCargo.value.trim() || !prefix || !(end >= start)) {
+      fGenResult.innerHTML = '<div class="wh-result warn">请完整填写生成条件</div>';
+      return;
+    }
+    const width = String(end).length;
+    let added = 0, skipped = 0;
+    for (let i = start; i <= end; i++) {
+      const name = prefix + String(i).padStart(width, "0");
+      try {
+        await api("warehouse-locations", {
+          method: "POST",
+          body: {
+            warehouseId: wh.id, storageArea: fGenArea.value.trim(),
+            cargoArea: fGenCargo.value.trim(), locationName: name,
+          },
+        });
+        added++;
+      } catch (_) { skipped++; }
+    }
+    fGenResult.innerHTML =
+      `<div class="wh-result ok">已生成 ${added} 个货位${skipped ? `,跳过 ${skipped} 个(已存在)` : ""}</div>`;
+    state.whSel.area = fGenArea.value.trim();
+    state.whSel.cargo = fGenCargo.value.trim();
+    await renderWarehouses();
+  };
 }
 
 async function renderProjects() {
+  if (state.productProjectId) return renderProjectProducts();
   if (!state.projects.length || state.user.role !== "admin") {
     state.projects = await api("projects");
   }
   const warehouses = await api("warehouses");
-  const products = await api("products?status=active");
   const projects = state.user.role === "admin"
     ? state.projects : state.projects;
   const editing = state.editingProject;
@@ -1434,19 +1996,6 @@ async function renderProjects() {
         <label>状态<select name="status"><option value="active">启用</option>
           <option value="disabled">停用</option></select></label>
         <button class="btn primary" type="submit">${editing ? "保存" : "创建"}</button>
-      </form>
-    </div>
-    <div class="panel">
-      <div class="panel-header"><h3>项目可用商品</h3></div>
-      <form id="projectProductsForm" class="fields-row">
-        <label>项目<select name="projectId" required>
-          <option value="">请选择项目</option>
-          ${projects.map(item => `<option value="${item.id}">${esc(item.project_name)}</option>`).join("")}
-        </select></label>
-        <label>商品（按住Ctrl可多选）<select name="productIds" multiple size="6">
-          ${products.map(item => `<option value="${esc(item.product_id)}">${esc(item.product_id)} · ${esc(item.product_name)}</option>`).join("")}
-        </select></label>
-        <button class="btn primary" type="submit">保存商品</button>
       </form>
     </div>
     <div class="panel">
@@ -1503,37 +2052,16 @@ async function renderProjects() {
       await renderProjects();
     } catch (error) { toast(error.message, true); }
   };
-  const productForm = document.getElementById("projectProductsForm");
-  productForm.projectId.onchange = () => {
-    const project = projects.find(item => String(item.id) === productForm.projectId.value);
-    [...productForm.productIds.options].forEach(option => {
-      option.selected = project?.productIds?.includes(option.value) || false;
-    });
-  };
-  productForm.onsubmit = async event => {
-    event.preventDefault();
-    const projectId = productForm.projectId.value;
-    if (!projectId) return toast("请选择项目", true);
-    try {
-      await api(`projects/${projectId}/products`, {
-        method: "PUT",
-        body: {
-          productIds: [...productForm.productIds.selectedOptions].map(option => option.value),
-        },
-      });
-      state.projects = [];
-      toast("项目商品已保存");
-      await renderProjects();
-    } catch (error) { toast(error.message, true); }
-  };
   document.getElementById("projectTable").innerHTML = simpleTable(
-    ["项目", "仓库 / 库区", "状态", "项目管理员", "库存批次", "说明", "操作"],
+    ["项目", "仓库 / 库区", "状态", "项目管理员", "商品", "库存批次", "说明", "操作"],
     projects.map(project => [
       esc(project.project_name),
       `${esc(project.warehouse_name || "-")} / ${esc(project.storage_area || "-")}`,
       setStatus(project.status), project.user_count || 0,
+      project.product_count ?? 0,
       project.lot_count ?? 0, esc(project.remark || "-"),
       `<div class="actions">
+        <button class="btn small" data-action="products" data-id="${project.id}">商品</button>
         <button class="btn small" data-action="edit" data-id="${project.id}">修改</button>
         <button class="btn small" data-action="status" data-id="${project.id}"
           data-status="${project.status === "active" ? "disabled" : "active"}">
@@ -1545,7 +2073,11 @@ async function renderProjects() {
   document.querySelectorAll("#projectTable button[data-action]").forEach(button => {
     button.onclick = async () => {
       const project = projects.find(item => String(item.id) === button.dataset.id);
-      if (button.dataset.action === "edit") {
+      if (button.dataset.action === "products") {
+        state.productProjectId = project.id;
+        state.editingProduct = null;
+        await renderProjects();
+      } else if (button.dataset.action === "edit") {
         state.editingProject = project;
         await renderProjects();
       } else if (button.dataset.action === "status") {
@@ -1866,7 +2398,6 @@ async function renderPage() {
   try {
     if (state.user.role === "admin") {
       if (page === "dashboard") await renderDashboard();
-      else if (page === "products") await renderProducts();
       else if (page === "warehouses") await renderWarehouses();
       else if (page === "projects") await renderProjects();
       else if (page === "users") await renderUsers();

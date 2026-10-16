@@ -77,18 +77,13 @@ class WarehouseDataFactory:
         )
         self.product = service.create_product(
             self.connection, self.admin, "AUTO-P001", "自动测试商品",
-            "100g", "个", "测试分类", 0.1, 0.01, 30,
+            project_id=self.project_a["id"],
+            spec="100g", unit="个", category="测试分类",
+            unit_weight=0.1, volume=0.01, shelf_life_days=30,
         )
         self.disabled_product = service.create_product(
-            self.connection, self.admin, "AUTO-P002", "停用商品", "200g", "箱"
-        )
-        service.set_project_products(
-            self.connection, self.admin, self.project_a["id"],
-            ["AUTO-P001"],
-        )
-        service.set_project_products(
-            self.connection, self.admin, self.project_b["id"],
-            ["AUTO-P001"],
+            self.connection, self.admin, "AUTO-P002", "停用商品",
+            project_id=self.project_a["id"], spec="200g", unit="箱",
         )
         service.update_product(
             self.connection,

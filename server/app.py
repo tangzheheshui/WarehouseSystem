@@ -791,9 +791,11 @@ class Handler(BaseHTTPRequestHandler):
         if method == "GET" and self.path == "/api/products":
             user = self.require_user(connection, role="admin")
             if user:
+                project_id = self.query_value("projectId")
                 self.send_json(service.list_products(
                     connection, self.query_value("keyword"),
                     self.query_value("status"),
+                    project_id=int(project_id) if project_id else None,
                 ))
             return
 
@@ -804,7 +806,8 @@ class Handler(BaseHTTPRequestHandler):
             body = self.read_json()
             self.send_json(service.create_product(
                 connection, user, body.get("productCode"),
-                body.get("productName"), body.get("spec"), body.get("unit"),
+                body.get("productName"), body.get("projectId"),
+                body.get("spec"), body.get("unit"),
                 body.get("category"), body.get("unitWeight"),
                 body.get("volume"), body.get("shelfLifeDays"),
             ))
@@ -844,6 +847,19 @@ class Handler(BaseHTTPRequestHandler):
             ))
             return
 
+        match = re.fullmatch(r"/api/warehouses/(\d+)", self.path)
+        if match and method == "PUT":
+            user = self.require_admin(connection)
+            if not user:
+                return
+            body = self.read_json()
+            self.send_json(service.update_warehouse(
+                connection, user, int(match.group(1)),
+                body.get("warehouseName"), body.get("address"),
+                body.get("contactName"), body.get("contactPhone"),
+            ))
+            return
+
         match = re.fullmatch(r"/api/warehouses/(\d+)/status", self.path)
         if match and method == "POST":
             user = self.require_admin(connection)
@@ -856,6 +872,61 @@ class Handler(BaseHTTPRequestHandler):
             ))
             return
 
+        # ---- 库区/货区结构档案管理 ----
+        match = re.fullmatch(r"/api/warehouses/(\d+)/areas", self.path)
+        if match and method == "POST":
+            user = self.require_admin(connection)
+            if not user:
+                return
+            body = self.read_json()
+            self.send_json(service.create_storage_area(
+                connection, user, int(match.group(1)), body.get("name"),
+            ))
+            return
+
+        match = re.fullmatch(r"/api/areas/(\d+)", self.path)
+        if match:
+            user = self.require_admin(connection)
+            if not user:
+                return
+            if method == "PUT":
+                body = self.read_json()
+                self.send_json(service.rename_storage_area(
+                    connection, user, int(match.group(1)), body.get("name"),
+                ))
+            elif method == "DELETE":
+                self.send_json(service.delete_storage_area(
+                    connection, user, int(match.group(1)),
+                ))
+            return
+
+        match = re.fullmatch(r"/api/areas/(\d+)/cargo-areas", self.path)
+        if match and method == "POST":
+            user = self.require_admin(connection)
+            if not user:
+                return
+            body = self.read_json()
+            self.send_json(service.create_cargo_area(
+                connection, user, int(match.group(1)), body.get("name"),
+            ))
+            return
+
+        match = re.fullmatch(r"/api/cargo-areas/(\d+)", self.path)
+        if match:
+            user = self.require_admin(connection)
+            if not user:
+                return
+            if method == "PUT":
+                body = self.read_json()
+                self.send_json(service.rename_cargo_area(
+                    connection, user, int(match.group(1)), body.get("name"),
+                ))
+            elif method == "DELETE":
+                self.send_json(service.delete_cargo_area(
+                    connection, user, int(match.group(1)),
+                ))
+            return
+
         if method == "POST" and self.path == "/api/warehouse-locations":
             user = self.require_admin(connection)
             if not user:
@@ -865,6 +936,16 @@ class Handler(BaseHTTPRequestHandler):
                 connection, user, body.get("warehouseId"),
                 body.get("storageArea"), body.get("cargoArea"),
                 body.get("locationName"),
+            ))
+            return
+
+        if method == "POST" and self.path == "/api/warehouse-locations/delete":
+            user = self.require_admin(connection)
+            if not user:
+                return
+            body = self.read_json()
+            self.send_json(service.delete_warehouse_locations(
+                connection, user, body.get("ids"),
             ))
             return
 
@@ -909,18 +990,6 @@ class Handler(BaseHTTPRequestHandler):
                 body.get("projectName"), body.get("warehouseId"),
                 body.get("storageArea"), body.get("remark"),
                 body.get("status"),
-            ))
-            return
-
-        match = re.fullmatch(r"/api/projects/(\d+)/products", self.path)
-        if match and method == "PUT":
-            user = self.require_admin(connection)
-            if not user:
-                return
-            body = self.read_json()
-            self.send_json(service.set_project_products(
-                connection, user, int(match.group(1)),
-                body.get("productIds"),
             ))
             return
 

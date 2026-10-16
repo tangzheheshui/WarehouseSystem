@@ -147,9 +147,12 @@ def _optional_int(value, name, allow_zero=False):
     return number
 
 
-def list_products(connection, keyword=None, status=None):
+def list_products(connection, keyword=None, status=None, project_id=None):
     sql = "SELECT * FROM products WHERE 1=1"
     params = []
+    if project_id is not None:
+        sql += " AND project_id = ?"
+        params.append(project_id)
     if keyword:
         sql += " AND (product_id LIKE ? OR product_name LIKE ? OR spec LIKE ?)"
         value = f"%{keyword.strip()}%"
@@ -162,10 +165,15 @@ def list_products(connection, keyword=None, status=None):
 
 
 def create_product(connection, operator, product_code, product_name,
-                   spec=None, unit=None, category=None, unit_weight=None,
-                   volume=None, shelf_life_days=None):
+                   project_id=None, spec=None, unit=None, category=None,
+                   unit_weight=None, volume=None, shelf_life_days=None):
     product_code = _required_text(product_code, "货品编号", 50)
     product_name = _required_text(product_name, "货品名称")
+    project = connection.execute(
+        "SELECT * FROM projects WHERE id = ?", (project_id,)
+    ).fetchone()
+    if not project:
+        raise ValueError("请选择商品所属项目")
     spec = str(spec or "").strip() or None
     unit = str(unit or "").strip() or None
     category = str(category or "").strip() or None
@@ -184,14 +192,18 @@ def create_product(connection, operator, product_code, product_name,
         raise ValueError("货品编号已存在")
     now = iso_now()
     connection.execute(
-        """INSERT INTO products(product_id, product_name, spec, unit, category,
-                                unit_weight, volume, shelf_life_days, status,
-                                created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?)""",
-        (product_code, product_name, spec, unit, category, unit_weight,
-         volume, shelf_life_days, now, now),
+        """INSERT INTO products(product_id, product_name, project_id, spec, unit,
+                                category, unit_weight, volume, shelf_life_days,
+                                status, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?)""",
+        (product_code, product_name, project["id"], spec, unit, category,
+         unit_weight, volume, shelf_life_days, now, now),
     )
-    audit(connection, operator, "product.create", f"创建商品 {product_code} {product_name}")
+    audit(
+        connection, operator, "product.create",
+        f"在项目 {project['project_name']} 创建商品 {product_code} {product_name}",
+        project_id=project["id"],
+    )
     connection.commit()
     row = connection.execute(
         "SELECT * FROM products WHERE product_id = ?", (product_code,)
@@ -257,9 +269,37 @@ def list_warehouses(connection, keyword=None):
     for row in connection.execute(sql, params):
         item = dict(row)
         item["locations"] = [dict(location) for location in connection.execute(
-            """SELECT * FROM warehouse_locations
-               WHERE warehouse_id = ?
-               ORDER BY storage_area, cargo_area, location_name""",
+            """SELECT l.*,
+                      (SELECT COALESCE(SUM(i.total_quantity
+                            - i.picking_reserved - i.moving_reserved), 0)
+                       FROM inventory i WHERE i.location_id = l.id) AS stock_quantity
+               FROM warehouse_locations l
+               WHERE l.warehouse_id = ?
+               ORDER BY l.storage_area, l.cargo_area, l.location_name""",
+            (row["id"],),
+        )]
+        item["areas"] = [dict(area) for area in connection.execute(
+            """SELECT sa.id, sa.name, sa.status,
+                      (SELECT COUNT(*) FROM cargo_areas ca
+                        WHERE ca.storage_area_id = sa.id) AS cargo_count,
+                      (SELECT COUNT(*) FROM warehouse_locations l
+                        WHERE l.warehouse_id = sa.warehouse_id
+                          AND l.storage_area = sa.name) AS location_count
+               FROM storage_areas sa
+               WHERE sa.warehouse_id = ?
+               ORDER BY sa.name""",
+            (row["id"],),
+        )]
+        item["cargoAreas"] = [dict(cargo) for cargo in connection.execute(
+            """SELECT ca.id, ca.storage_area_id, ca.name, ca.status,
+                      (SELECT COUNT(*) FROM warehouse_locations l
+                        WHERE l.warehouse_id = sa.warehouse_id
+                          AND l.storage_area = sa.name
+                          AND l.cargo_area = ca.name) AS location_count
+               FROM cargo_areas ca
+               JOIN storage_areas sa ON sa.id = ca.storage_area_id
+               WHERE sa.warehouse_id = ?
+               ORDER BY sa.name, ca.name""",
             (row["id"],),
         )]
         warehouses.append(item)
@@ -294,6 +334,301 @@ def create_warehouse(connection, operator, warehouse_name, address=None,
     ).fetchone())
 
 
+# ---- 库区/货区结构档案：实体化管理，支持先建空层后填货位 ----
+# warehouse_locations 的 storage_area/cargo_area 仍存名称，档案与货位
+# 在写操作时同步：建档位自动登记、改名批量同步、删除校验非空。
+
+def _ensure_area_entities(connection, warehouse_id, storage_area, cargo_area,
+                          now):
+    """建档位时自动登记库区/货区档案，保证结构树完整。"""
+    area = connection.execute(
+        "SELECT id FROM storage_areas WHERE warehouse_id = ? AND name = ?",
+        (warehouse_id, storage_area),
+    ).fetchone()
+    if not area:
+        connection.execute(
+            """INSERT INTO storage_areas(warehouse_id, name, created_at, updated_at)
+               VALUES (?, ?, ?, ?)""",
+            (warehouse_id, storage_area, now, now),
+        )
+        area_id = connection.execute("SELECT last_insert_rowid()").fetchone()[0]
+    else:
+        area_id = area["id"]
+    cargo = connection.execute(
+        "SELECT id FROM cargo_areas WHERE storage_area_id = ? AND name = ?",
+        (area_id, cargo_area),
+    ).fetchone()
+    if not cargo:
+        connection.execute(
+            """INSERT INTO cargo_areas(storage_area_id, name, created_at, updated_at)
+               VALUES (?, ?, ?, ?)""",
+            (area_id, cargo_area, now, now),
+        )
+
+
+def create_storage_area(connection, operator, warehouse_id, name):
+    name = _required_text(name, "库区名", 50)
+    warehouse = connection.execute(
+        "SELECT * FROM warehouses WHERE id = ?", (warehouse_id,)
+    ).fetchone()
+    if not warehouse:
+        raise ValueError("仓库不存在")
+    if connection.execute(
+        "SELECT 1 FROM storage_areas WHERE warehouse_id = ? AND name = ?",
+        (warehouse_id, name),
+    ).fetchone():
+        raise ValueError("库区名已存在")
+    now = iso_now()
+    connection.execute(
+        """INSERT INTO storage_areas(warehouse_id, name, created_at, updated_at)
+           VALUES (?, ?, ?, ?)""",
+        (warehouse_id, name, now, now),
+    )
+    audit(connection, operator, "warehouse.area.create",
+          f"在仓库 {warehouse['warehouse_name']} 创建库区 {name}")
+    connection.commit()
+    return dict(connection.execute(
+        "SELECT * FROM storage_areas WHERE id = ?",
+        (connection.execute("SELECT last_insert_rowid()").fetchone()[0],),
+    ).fetchone())
+
+
+def create_cargo_area(connection, operator, storage_area_id, name):
+    name = _required_text(name, "货区名", 50)
+    area = connection.execute(
+        """SELECT sa.*, w.warehouse_name FROM storage_areas sa
+           JOIN warehouses w ON w.id = sa.warehouse_id
+           WHERE sa.id = ?""",
+        (storage_area_id,),
+    ).fetchone()
+    if not area:
+        raise ValueError("库区不存在")
+    if connection.execute(
+        "SELECT 1 FROM cargo_areas WHERE storage_area_id = ? AND name = ?",
+        (storage_area_id, name),
+    ).fetchone():
+        raise ValueError("货区名已存在")
+    now = iso_now()
+    connection.execute(
+        """INSERT INTO cargo_areas(storage_area_id, name, created_at, updated_at)
+           VALUES (?, ?, ?, ?)""",
+        (storage_area_id, name, now, now),
+    )
+    audit(connection, operator, "warehouse.cargo.create",
+          f"在 {area['warehouse_name']} / {area['name']} 创建货区 {name}")
+    connection.commit()
+    return dict(connection.execute(
+        "SELECT * FROM cargo_areas WHERE id = ?",
+        (connection.execute("SELECT last_insert_rowid()").fetchone()[0],),
+    ).fetchone())
+
+
+def rename_storage_area(connection, operator, storage_area_id, new_name):
+    new_name = _required_text(new_name, "库区名", 50)
+    area = connection.execute(
+        "SELECT * FROM storage_areas WHERE id = ?", (storage_area_id,)
+    ).fetchone()
+    if not area:
+        raise ValueError("库区不存在")
+    if new_name != area["name"] and connection.execute(
+        "SELECT 1 FROM storage_areas WHERE warehouse_id = ? AND name = ?",
+        (area["warehouse_id"], new_name),
+    ).fetchone():
+        raise ValueError("库区名已存在")
+    now = iso_now()
+    connection.execute(
+        "UPDATE storage_areas SET name = ?, updated_at = ? WHERE id = ?",
+        (new_name, now, storage_area_id),
+    )
+    cursor = connection.execute(
+        """UPDATE warehouse_locations SET storage_area = ?, updated_at = ?
+           WHERE warehouse_id = ? AND storage_area = ?""",
+        (new_name, now, area["warehouse_id"], area["name"]),
+    )
+    audit(connection, operator, "warehouse.area.rename",
+          f"库区 {area['name']} 改名为 {new_name}（同步 {cursor.rowcount} 个货位）")
+    connection.commit()
+    return dict(connection.execute(
+        "SELECT * FROM storage_areas WHERE id = ?", (storage_area_id,)
+    ).fetchone())
+
+
+def rename_cargo_area(connection, operator, cargo_area_id, new_name):
+    new_name = _required_text(new_name, "货区名", 50)
+    cargo = connection.execute(
+        """SELECT ca.*, sa.warehouse_id, sa.name AS area_name
+           FROM cargo_areas ca
+           JOIN storage_areas sa ON sa.id = ca.storage_area_id
+           WHERE ca.id = ?""",
+        (cargo_area_id,),
+    ).fetchone()
+    if not cargo:
+        raise ValueError("货区不存在")
+    if new_name != cargo["name"] and connection.execute(
+        "SELECT 1 FROM cargo_areas WHERE storage_area_id = ? AND name = ?",
+        (cargo["storage_area_id"], new_name),
+    ).fetchone():
+        raise ValueError("货区名已存在")
+    now = iso_now()
+    connection.execute(
+        "UPDATE cargo_areas SET name = ?, updated_at = ? WHERE id = ?",
+        (new_name, now, cargo_area_id),
+    )
+    cursor = connection.execute(
+        """UPDATE warehouse_locations SET cargo_area = ?, updated_at = ?
+           WHERE warehouse_id = ? AND storage_area = ? AND cargo_area = ?""",
+        (new_name, now, cargo["warehouse_id"], cargo["area_name"],
+         cargo["name"]),
+    )
+    audit(connection, operator, "warehouse.cargo.rename",
+          f"货区 {cargo['area_name']} / {cargo['name']} 改名为 {new_name}"
+          f"（同步 {cursor.rowcount} 个货位）")
+    connection.commit()
+    return dict(connection.execute(
+        "SELECT * FROM cargo_areas WHERE id = ?", (cargo_area_id,)
+    ).fetchone())
+
+
+def delete_storage_area(connection, operator, storage_area_id):
+    area = connection.execute(
+        """SELECT sa.*, w.warehouse_name FROM storage_areas sa
+           JOIN warehouses w ON w.id = sa.warehouse_id
+           WHERE sa.id = ?""",
+        (storage_area_id,),
+    ).fetchone()
+    if not area:
+        raise ValueError("库区不存在")
+    loc_count = connection.execute(
+        """SELECT COUNT(*) FROM warehouse_locations
+           WHERE warehouse_id = ? AND storage_area = ?""",
+        (area["warehouse_id"], area["name"]),
+    ).fetchone()[0]
+    if loc_count:
+        raise ValueError(f"库区内还有 {loc_count} 个货位，请先删除或移出货位")
+    connection.execute(
+        "DELETE FROM cargo_areas WHERE storage_area_id = ?", (storage_area_id,)
+    )
+    connection.execute(
+        "DELETE FROM storage_areas WHERE id = ?", (storage_area_id,)
+    )
+    audit(connection, operator, "warehouse.area.delete",
+          f"删除库区 {area['warehouse_name']} / {area['name']}")
+    connection.commit()
+    return list_warehouses(connection)
+
+
+def delete_cargo_area(connection, operator, cargo_area_id):
+    cargo = connection.execute(
+        """SELECT ca.*, sa.warehouse_id, sa.name AS area_name
+           FROM cargo_areas ca
+           JOIN storage_areas sa ON sa.id = ca.storage_area_id
+           WHERE ca.id = ?""",
+        (cargo_area_id,),
+    ).fetchone()
+    if not cargo:
+        raise ValueError("货区不存在")
+    loc_count = connection.execute(
+        """SELECT COUNT(*) FROM warehouse_locations
+           WHERE warehouse_id = ? AND storage_area = ? AND cargo_area = ?""",
+        (cargo["warehouse_id"], cargo["area_name"], cargo["name"]),
+    ).fetchone()[0]
+    if loc_count:
+        raise ValueError(f"货区内还有 {loc_count} 个货位，请先删除或移出货位")
+    connection.execute(
+        "DELETE FROM cargo_areas WHERE id = ?", (cargo_area_id,)
+    )
+    audit(connection, operator, "warehouse.cargo.delete",
+          f"删除货区 {cargo['area_name']} / {cargo['name']}")
+    connection.commit()
+    return list_warehouses(connection)
+
+
+def update_warehouse(connection, operator, warehouse_id, warehouse_name=None,
+                     address=None, contact_name=None, contact_phone=None):
+    row = connection.execute(
+        "SELECT * FROM warehouses WHERE id = ?", (warehouse_id,)
+    ).fetchone()
+    if not row:
+        raise ValueError("仓库不存在")
+    name = _required_text(warehouse_name, "仓库名称") \
+        if warehouse_name is not None else row["warehouse_name"]
+    if name != row["warehouse_name"] and connection.execute(
+        "SELECT 1 FROM warehouses WHERE warehouse_name = ?", (name,)
+    ).fetchone():
+        raise ValueError("仓库名称已存在")
+    if contact_phone is not None and not valid_phone(contact_phone):
+        raise ValueError("联系电话格式错误")
+    connection.execute(
+        """UPDATE warehouses SET warehouse_name = ?, address = ?,
+           contact_name = ?, contact_phone = ?, updated_at = ? WHERE id = ?""",
+        (
+            name,
+            str(address or "").strip() or None if address is not None
+            else row["address"],
+            str(contact_name or "").strip() or None if contact_name is not None
+            else row["contact_name"],
+            contact_phone if contact_phone is not None
+            else row["contact_phone"],
+            iso_now(), warehouse_id,
+        ),
+    )
+    audit(connection, operator, "warehouse.update", f"修改仓库 {name}")
+    connection.commit()
+    return dict(connection.execute(
+        "SELECT * FROM warehouses WHERE id = ?", (warehouse_id,)
+    ).fetchone())
+
+
+# 删除货位前检查全部引用：库存、流水、单据明细、移库目标、拣货单
+_LOCATION_REF_QUERIES = (
+    ("库存", "SELECT COUNT(*) FROM inventory WHERE location_id = ?"),
+    ("库存流水", "SELECT COUNT(*) FROM stock_logs WHERE location_id = ?"),
+    ("单据明细", "SELECT COUNT(*) FROM stock_order_items WHERE location_id = ?"),
+    ("移库单", "SELECT COUNT(*) FROM stock_orders WHERE to_location_id = ?"),
+    ("拣货记录", "SELECT COUNT(*) FROM picking_items WHERE location_id = ?"),
+)
+
+
+def delete_warehouse_locations(connection, operator, location_ids):
+    ids = location_ids or []
+    if not isinstance(ids, list) or not ids:
+        raise ValueError("请选择要删除的货位")
+    ids = [int(value) for value in ids]
+    deleted, blocked = [], []
+    for location_id in ids:
+        row = connection.execute(
+            """SELECT l.*, w.warehouse_name FROM warehouse_locations l
+               JOIN warehouses w ON w.id = l.warehouse_id
+               WHERE l.id = ?""",
+            (location_id,),
+        ).fetchone()
+        if not row:
+            blocked.append({"id": location_id, "reason": "货位不存在"})
+            continue
+        full = (f"{row['storage_area']}/{row['cargo_area']}/"
+                f"{row['location_name']}")
+        reason = None
+        for label, sql in _LOCATION_REF_QUERIES:
+            if connection.execute(sql, (location_id,)).fetchone()[0]:
+                reason = f"有{label}记录"
+                break
+        if reason:
+            blocked.append({"id": location_id, "name": full,
+                            "reason": f"{reason}，请改用停用"})
+            continue
+        connection.execute(
+            "DELETE FROM warehouse_locations WHERE id = ?", (location_id,)
+        )
+        deleted.append(full)
+        audit(connection, operator, "warehouse.location.delete",
+              f"删除货位 {row['warehouse_name']} / {full}")
+    connection.commit()
+    # 注意：空库区/空货区是用户显式搭建的结构（先建层后填位），不自动清理，
+    # 需要时由用户在树上显式删除。
+    return {"deleted": deleted, "blocked": blocked,
+            "warehouses": list_warehouses(connection)}
+
+
 def create_location(connection, operator, warehouse_id, storage_area,
                     cargo_area, location_name):
     warehouse = connection.execute(
@@ -312,6 +647,8 @@ def create_location(connection, operator, warehouse_id, storage_area,
     ).fetchone():
         raise ValueError("货位已存在")
     now = iso_now()
+    _ensure_area_entities(connection, warehouse_id, storage_area, cargo_area,
+                          now)
     cursor = connection.execute(
         """INSERT INTO warehouse_locations
            (warehouse_id, storage_area, cargo_area, location_name, status,
@@ -363,19 +700,13 @@ def list_project_rows(connection):
                     JOIN users u ON u.id = up.user_id
                     WHERE up.project_id = p.id AND u.role = 'project_admin'
                       AND u.status = 'active') AS user_count,
+                  (SELECT COUNT(*) FROM products pd
+                    WHERE pd.project_id = p.id AND pd.status = 'active') AS product_count,
                   (SELECT COUNT(*) FROM inventory i WHERE i.project_id = p.id) AS lot_count
            FROM projects p
            LEFT JOIN warehouses w ON w.id = p.warehouse_id
            ORDER BY p.id"""
     )]
-    for row in rows:
-        row["productIds"] = [
-            item["product_id"]
-            for item in connection.execute(
-                "SELECT product_id FROM project_products WHERE project_id = ? ORDER BY product_id",
-                (row["id"],),
-            )
-        ]
     return rows
 
 
@@ -479,45 +810,6 @@ def update_project(connection, operator, project_id, project_name=None,
     return dict(connection.execute(
         "SELECT * FROM projects WHERE id = ?", (project_id,)
     ).fetchone())
-
-
-def set_project_products(connection, operator, project_id, product_ids):
-    row = connection.execute(
-        "SELECT * FROM projects WHERE id = ?", (project_id,)
-    ).fetchone()
-    if not row:
-        raise ValueError("项目不存在")
-    ids = product_ids or []
-    if not isinstance(ids, list):
-        raise ValueError("商品列表无效")
-    ids = [str(value).strip() for value in ids if str(value).strip()]
-    if len(set(ids)) != len(ids):
-        raise ValueError("商品不能重复")
-    if ids:
-        placeholders = ",".join("?" for _ in ids)
-        found = connection.execute(
-            f"""SELECT product_id FROM products
-                WHERE status = 'active' AND product_id IN ({placeholders})""",
-            ids,
-        ).fetchall()
-        if len(found) != len(ids):
-            raise ValueError("包含不存在或已停用的商品")
-    now = iso_now()
-    connection.execute(
-        "DELETE FROM project_products WHERE project_id = ?", (project_id,)
-    )
-    for product_id in ids:
-        connection.execute(
-            """INSERT INTO project_products(project_id, product_id, created_at)
-               VALUES (?, ?, ?)""",
-            (project_id, product_id, now),
-        )
-    audit(
-        connection, operator, "project.products",
-        f"设置项目 {row['project_name']} 可用商品 {len(ids)} 个", project_id,
-    )
-    connection.commit()
-    return list_project_rows(connection)
 
 
 def _user_project_ids(connection, user_id):
@@ -986,14 +1278,10 @@ def _validate_items(connection, project_id, order_type, items):
             continue
         if product["status"] != "active":
             _error(errors, row_no, "货品编号", f"货品已停用：{code}")
-        linked = connection.execute(
-            """SELECT 1 FROM project_products
-               WHERE project_id = ? AND product_id = ?""",
-            (project_id, code),
-        ).fetchone()
+        linked = product["project_id"] == project_id
         if not linked:
             _error(errors, row_no, "货品编号",
-                   f"货品未添加到当前项目，请联系管理员：{code}")
+                   f"货品不属于当前项目，请联系管理员：{code}")
         unit = item.get("unit")
         if unit and product["unit"] and product["unit"] != unit:
             _error(errors, row_no, "单位", "单位与商品档案不一致")
@@ -2275,20 +2563,17 @@ def import_history_csv(connection, operator, project_id, data):
             ).fetchone()
             if product and product["product_name"] != item["product_name"]:
                 raise ValueError(f"货品编号 {code} 的名称与商品档案不一致")
+            if product and product["project_id"] != project_id:
+                raise ValueError(f"货品编号 {code} 已属于其他项目")
             if not product:
                 connection.execute(
                     """INSERT INTO products
-                       (product_id, product_name, spec, unit, status,
+                       (product_id, product_name, project_id, spec, unit, status,
                         created_at, updated_at)
-                       VALUES (?, ?, NULL, ?, 'active', ?, ?)""",
-                    (code, item["product_name"], item["unit"] or None, now, now),
+                       VALUES (?, ?, ?, NULL, ?, 'active', ?, ?)""",
+                    (code, item["product_name"], project_id,
+                     item["unit"] or None, now, now),
                 )
-            connection.execute(
-                """INSERT OR IGNORE INTO project_products
-                   (project_id, product_id, created_at)
-                   VALUES (?, ?, ?)""",
-                (project_id, code, now),
-            )
             warehouse = connection.execute(
                 "SELECT * FROM warehouses WHERE warehouse_name = ?", (warehouse_name,)
             ).fetchone()
@@ -2309,6 +2594,8 @@ def import_history_csv(connection, operator, project_id, data):
                 (warehouse_id, storage_area, cargo_area, location_name),
             ).fetchone()
             if not location:
+                _ensure_area_entities(connection, warehouse_id, storage_area,
+                                      cargo_area, now)
                 cursor = connection.execute(
                     """INSERT INTO warehouse_locations
                        (warehouse_id, storage_area, cargo_area, location_name,

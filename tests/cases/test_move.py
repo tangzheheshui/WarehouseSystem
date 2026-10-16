@@ -48,10 +48,9 @@ class MoveTests(unittest.TestCase):
         )
         service.create_product(
             self.connection, self.admin, "H001", "测试商品",
-            "100g", "个", "测试", None, None, 10,
-        )
-        service.set_project_products(
-            self.connection, self.admin, self.project_a["id"], ["H001"]
+            project_id=self.project_a["id"],
+            spec="100g", unit="个", category="测试",
+            shelf_life_days=10,
         )
         created = service.create_user(
             self.connection, self.admin, "zhangsan", "张三",

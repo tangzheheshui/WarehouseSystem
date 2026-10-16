@@ -159,20 +159,16 @@ def seed_business_data(connection):
             connection, admin, name, warehouse["id"], storage_area, remark
         )
 
-    project_products = {}
+    # 商品直接归属项目：演示数据里每个商品只属于一个项目
     for code, name, spec, unit, category, weight, volume, shelf, owners in PRODUCTS:
-        if not fetch_one(
-            "SELECT 1 FROM products WHERE product_id = ?", (code,)
-        ):
-            service.create_product(
-                connection, admin, code, name, spec, unit, category,
-                weight, volume, shelf,
-            )
-        for project_name in owners:
-            project_products.setdefault(project_name, []).append(code)
-    for project_name, codes in project_products.items():
-        service.set_project_products(
-            connection, admin, projects[project_name]["id"], codes
+        if fetch_one("SELECT 1 FROM products WHERE product_id = ?", (code,)):
+            continue
+        owner = owners[0]
+        service.create_product(
+            connection, admin, code, name,
+            project_id=projects[owner]["id"],
+            spec=spec, unit=unit, category=category,
+            unit_weight=weight, volume=volume, shelf_life_days=shelf,
         )
 
     for username, display_name, phone, role, initial, final, owners in USERS:

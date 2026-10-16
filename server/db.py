@@ -76,6 +76,26 @@ CREATE TABLE IF NOT EXISTS warehouses (
     updated_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS storage_areas (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    warehouse_id INTEGER NOT NULL REFERENCES warehouses(id) ON DELETE CASCADE,
+    name TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'active' CHECK(status IN ('active', 'disabled')),
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE(warehouse_id, name)
+);
+
+CREATE TABLE IF NOT EXISTS cargo_areas (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    storage_area_id INTEGER NOT NULL REFERENCES storage_areas(id) ON DELETE CASCADE,
+    name TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'active' CHECK(status IN ('active', 'disabled')),
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE(storage_area_id, name)
+);
+
 CREATE TABLE IF NOT EXISTS warehouse_locations (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     warehouse_id INTEGER NOT NULL REFERENCES warehouses(id),
@@ -120,6 +140,7 @@ CREATE TABLE IF NOT EXISTS sessions (
 CREATE TABLE IF NOT EXISTS products (
     product_id TEXT PRIMARY KEY,
     product_name TEXT NOT NULL,
+    project_id INTEGER REFERENCES projects(id),
     spec TEXT,
     unit TEXT,
     category TEXT,
@@ -129,13 +150,6 @@ CREATE TABLE IF NOT EXISTS products (
     status TEXT NOT NULL DEFAULT 'active' CHECK(status IN ('active', 'disabled')),
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS project_products (
-    project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
-    product_id TEXT NOT NULL REFERENCES products(product_id),
-    created_at TEXT NOT NULL,
-    PRIMARY KEY(project_id, product_id)
 );
 
 CREATE TABLE IF NOT EXISTS inventory (
@@ -259,6 +273,7 @@ INDEXES = """
 CREATE INDEX IF NOT EXISTS idx_locations_warehouse
     ON warehouse_locations(warehouse_id, storage_area, cargo_area, location_name);
 CREATE INDEX IF NOT EXISTS idx_user_projects_project ON user_projects(project_id);
+CREATE INDEX IF NOT EXISTS idx_products_project ON products(project_id);
 CREATE INDEX IF NOT EXISTS idx_inventory_project_product
     ON inventory(project_id, product_id);
 CREATE INDEX IF NOT EXISTS idx_orders_project_time ON stock_orders(project_id, created_at);
@@ -463,15 +478,11 @@ def _migrate_legacy(connection):
     for row in data.get("products", []):
         connection.execute(
             """INSERT INTO products
-               (product_id, product_name, spec, unit, status, created_at, updated_at)
-               VALUES (?, ?, ?, NULL, 'active', ?, ?)""",
-            (row["product_id"], row["product_name"], row["spec"],
-             row["created_at"], row["updated_at"]),
-        )
-        connection.execute(
-            """INSERT OR IGNORE INTO project_products(project_id, product_id, created_at)
-               VALUES (?, ?, ?)""",
-            (project_id, row["product_id"], migration_now),
+               (product_id, product_name, project_id, spec, unit, status,
+                created_at, updated_at)
+               VALUES (?, ?, ?, ?, NULL, 'active', ?, ?)""",
+            (row["product_id"], row["product_name"], project_id,
+             row["spec"], row["created_at"], row["updated_at"]),
         )
 
     location_ids = {}
@@ -625,6 +636,8 @@ def init_db(path=None, admin_username=None, admin_display_name=None,
             connection.executescript(SCHEMA)
             _migrate_v4_columns(connection)
             _migrate_v5(connection)
+            _migrate_products_project(connection)
+            _migrate_area_entities(connection)
             _reset_templates_v4(connection)
             if connection.execute("SELECT COUNT(*) FROM projects").fetchone()[0] == 0:
                 connection.execute(
@@ -724,6 +737,66 @@ def _migrate_v4_columns(connection):
             key TEXT PRIMARY KEY,
             value TEXT NOT NULL
         )"""
+    )
+
+
+def _migrate_products_project(connection):
+    """商品归属唯一项目：老库补 project_id 列，从授权表回填后退役该表。
+
+    授权了多个项目的商品归最早授权的项目；从未授权的商品归第一个项目，
+    保证迁移后每个商品都能在新版「项目内商品管理」里找到并维护。
+    """
+    if "project_id" in _columns(connection, "products"):
+        return
+    connection.execute(
+        "ALTER TABLE products ADD COLUMN project_id INTEGER REFERENCES projects(id)"
+    )
+    if _table_exists(connection, "project_products"):
+        connection.execute(
+            """UPDATE products SET project_id = (
+                   SELECT pp.project_id FROM project_products pp
+                   WHERE pp.product_id = products.product_id
+                   ORDER BY pp.created_at, pp.rowid LIMIT 1
+               )"""
+        )
+        connection.execute("DROP TABLE project_products")
+    connection.execute(
+        """UPDATE products SET project_id = (
+               SELECT MIN(id) FROM projects
+           ) WHERE project_id IS NULL"""
+    )
+
+
+def _table_exists(connection, name):
+    return bool(connection.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+        (name,),
+    ).fetchone())
+
+
+def _migrate_area_entities(connection):
+    """库区/货区实体化：从货位表回填结构档案，支持先建空层后填货位。
+
+    warehouse_locations 的 storage_area/cargo_area 仍存名称（单据、导入、
+    解析全部按名称工作），结构档案与货位名称在写操作时双向同步。
+    幂等：DISTINCT 回填，跑多少次结果一致。
+    """
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+    connection.execute(
+        """INSERT OR IGNORE INTO storage_areas(warehouse_id, name, status,
+                                            created_at, updated_at)
+           SELECT DISTINCT warehouse_id, storage_area, 'active', ?, ?
+           FROM warehouse_locations""",
+        (now, now),
+    )
+    connection.execute(
+        """INSERT OR IGNORE INTO cargo_areas(storage_area_id, name, status,
+                                             created_at, updated_at)
+           SELECT DISTINCT sa.id, l.cargo_area, 'active', ?, ?
+           FROM warehouse_locations l
+           JOIN storage_areas sa
+             ON sa.warehouse_id = l.warehouse_id AND sa.name = l.storage_area""",
+        (now, now),
     )
 
 

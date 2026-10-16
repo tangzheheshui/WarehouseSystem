@@ -456,11 +456,15 @@ class PlatformServerTestCase(unittest.TestCase):
         self.assertEqual(data["username"], "admin")
 
         # 数据也隔离：alpha 建的商品在 beta 不可见
+        status, alpha_projects = self.request(
+            "GET", "alpha.wms.test", "/api/projects", token=alpha_token
+        )
+        self.assertEqual(status, 200)
         status, _ = self.request(
             "POST", "alpha.wms.test", "/api/products",
             {
                 "productCode": "ISO-P001", "productName": "隔离商品",
-                "unit": "个",
+                "projectId": alpha_projects[0]["id"], "unit": "个",
             },
             token=alpha_token,
         )

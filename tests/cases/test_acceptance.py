@@ -72,6 +72,7 @@ class WorkflowAcceptanceTests(unittest.TestCase):
                 self.admin,
                 "AUTO-P001",
                 "重复商品",
+                project_id=self.project_a["id"],
             )
         with self.assertRaisesRegex(ValueError, "仓库名称已存在"):
             service.create_warehouse(
@@ -366,11 +367,20 @@ class WorkflowAcceptanceTests(unittest.TestCase):
             self.project_user["id"],
             project_ids=[self.project_a["id"], self.project_b["id"]],
         )
+        # 商品归属唯一项目：B 项目用自己名下的商品入库
+        service.create_product(
+            self.connection, self.admin, "AUTO-B001", "B项目商品",
+            project_id=self.project_b["id"], unit="个",
+        )
         service.import_inbound(
             self.connection,
             self.project_user,
             self.project_b["id"],
-            self.fixture.workbook("inbound", [{"quantity": 6}], self.project_b["id"]),
+            self.fixture.workbook(
+                "inbound",
+                [{"product_code": "AUTO-B001", "quantity": 6}],
+                self.project_b["id"],
+            ),
         )
         rows_b = service.list_inventory(
             self.connection, self.project_user, self.project_b["id"]
@@ -481,7 +491,8 @@ class WorkflowAcceptanceTests(unittest.TestCase):
 
     def test_product_must_be_linked_to_project(self):
         unlinked = service.create_product(
-            self.connection, self.admin, "AUTO-P003", "未关联商品", "50g", "个"
+            self.connection, self.admin, "AUTO-P003", "未关联商品",
+            project_id=self.project_b["id"], spec="50g", unit="个",
         )
         with self.assertRaises(service.ImportValidationError) as caught:
             service.import_inbound(
@@ -494,7 +505,7 @@ class WorkflowAcceptanceTests(unittest.TestCase):
                 }]),
             )
         messages = [item["message"] for item in caught.exception.errors]
-        self.assertTrue(any("未添加到当前项目" in message for message in messages))
+        self.assertTrue(any("不属于当前项目" in message for message in messages))
 
     def test_summary_inventory_aggregates_by_product(self):
         service.import_inbound(
@@ -620,12 +631,18 @@ class HttpAcceptanceTests(unittest.TestCase):
         self.assertEqual(me["username"], "zhangsan")
         self.assertEqual(me["role"], "admin")
 
+        status, projects = self.request(
+            "GET", "/api/projects",
+            headers={"Authorization": f"Bearer {admin_token}"},
+        )
+        self.assertEqual(status, 200)
         status, created = self.request(
             "POST",
             "/api/products",
             {
                 "productCode": "HTTP-P001",
                 "productName": "HTTP测试商品",
+                "projectId": projects[0]["id"],
                 "spec": "10g",
                 "unit": "个",
             },
