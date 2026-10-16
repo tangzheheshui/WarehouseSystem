@@ -36,7 +36,7 @@ def normalize_base_path(value):
 class WarehouseServer(ThreadingHTTPServer):
     def __init__(self, address, handler, database_path, base_path="/",
                  registry=None, domain=None):
-        self.db_path = str(database_path)
+        self.db_path = str(database_path) if database_path else str(db.db_path())
         self.base_path = normalize_base_path(base_path)
         self.registry = registry
         self.domain = (domain or "").strip().lower().lstrip(".") or None
