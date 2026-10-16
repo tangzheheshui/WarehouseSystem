@@ -408,7 +408,8 @@ class PlatformRegistry:
                 "username": username,
                 "display_name": display_name,
                 "password_hash": hash_password(password),
-                "must_change_password": 1,
+                # 控制台归平台管理员本人所有：改密自愿，不做首登强制
+                "must_change_password": 0,
                 "failed_attempts": 0,
                 "locked_until": None,
             }

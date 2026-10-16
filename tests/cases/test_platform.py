@@ -165,18 +165,18 @@ class PlatformServerTestCase(unittest.TestCase):
         )
         self.assertEqual(status, 401)
 
-    def test_console_must_change_password_gate(self):
+    def test_console_change_password_optional(self):
+        """控制台改密自愿：即使账号带 must_change_password 旧标记，
+        业务接口也不拦截，改密只是侧边栏里的普通入口。"""
         with self.registry.lock:
             self.registry._admin()["must_change_password"] = 1
             self.registry._save()
 
         token, user = self.console_login()
-        self.assertTrue(user["mustChangePassword"])
         status, data = self.request(
             "GET", f"console.{DOMAIN}", "/api/console/companies", token=token
         )
-        self.assertEqual(status, 403)
-        self.assertTrue(data["mustChangePassword"])
+        self.assertEqual(status, 200, data)
 
         new_password = "Wanshun888999"
         status, data = self.request(
@@ -188,8 +188,15 @@ class PlatformServerTestCase(unittest.TestCase):
         self.assertEqual(status, 200, data)
         type(self).admin_password = new_password
 
+        # 改密后旧密码不能再登录，新密码可以
+        status, _ = self.request(
+            "POST", f"console.{DOMAIN}", "/api/console/login",
+            {"username": "wanshun", "password": "Wanshun888999-old"},
+        )
+        self.assertEqual(status, 400)
+        token2, _ = self.console_login()
         status, data = self.request(
-            "GET", f"console.{DOMAIN}", "/api/console/companies", token=token
+            "GET", f"console.{DOMAIN}", "/api/console/companies", token=token2
         )
         self.assertEqual(status, 200, data)
 

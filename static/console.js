@@ -16,9 +16,9 @@ const titles = {
   password: "修改密码",
 };
 
+// 改密入口只保留侧边栏底部的「修改密码」按钮，导航不再重复放一项
 const pages = [
   { id: "companies", label: "公司管理", tone: "blue" },
-  { id: "password", label: "修改密码", tone: "slate" },
 ];
 
 function esc(value) {
@@ -418,9 +418,6 @@ function renderPassword() {
 
 async function render() {
   if (!state.user) return;
-  if (state.user.mustChangePassword && state.page !== "password") {
-    state.page = "password";
-  }
   document.getElementById("pageTitle").textContent =
     titles[state.page] || titles.companies;
   renderNav();

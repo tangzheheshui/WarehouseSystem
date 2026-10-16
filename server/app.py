@@ -207,18 +207,10 @@ class Handler(BaseHTTPRequestHandler):
         return getattr(self, "db_path_override", None) or self.server.db_path
 
     def console_admin(self, registry):
-        """控制台鉴权：返回管理员信息；须改密时限制可用接口。"""
+        """控制台鉴权：返回管理员信息。改密自愿，不做强制拦截。"""
         admin = registry.admin_for_token(self.token())
         if not admin:
             self.send_json({"error": "请先登录控制台"}, 401)
-            return None
-        if admin.get("must_change_password") and self.path not in (
-            "/api/console/me", "/api/console/change-password",
-            "/api/console/logout",
-        ):
-            self.send_json(
-                {"error": "请先修改初始密码", "mustChangePassword": True}, 403
-            )
             return None
         return admin
 
