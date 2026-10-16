@@ -10,7 +10,7 @@ const INVENTORY_COLUMNS_KEY = `wmsInventoryColumns:${BASE_PATH}`;
 
 const state = {
   token: localStorage.getItem(TOKEN_KEY) || "",
-  branding: { systemName: "万顺WMS仓库管理系统", companyName: "" },
+  branding: { systemName: "万顺WMS仓库管理系统", companyName: "", subscription: null },
   user: null,
   projects: [],
   projectId: localStorage.getItem(PROJECT_KEY) || "",
@@ -176,6 +176,19 @@ function applyBranding() {
   const name = (state.branding.companyName || "").trim();
   node.textContent = name;
   node.classList.toggle("hidden", !name);
+  // 订阅徽标：常显到期日，临期（≤30天）变警告色；永久/单公司部署不显示
+  const badge = document.getElementById("subscriptionBadge");
+  const subscription = state.branding.subscription;
+  if (subscription && subscription.state !== "perpetual") {
+    badge.textContent = subscription.state === "expiring"
+      ? `订阅剩 ${subscription.daysLeft} 天`
+      : `订阅到期 ${subscription.expiresAt}`;
+    badge.title = `订阅到期日 ${subscription.expiresAt}`;
+    badge.className = subscription.state === "expiring"
+      ? "badge warning" : "badge";
+  } else {
+    badge.className = "badge hidden";
+  }
 }
 
 async function loadBranding() {

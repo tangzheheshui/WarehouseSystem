@@ -83,6 +83,18 @@ def subscription_state(row):
     return "normal"
 
 
+def subscription_public(row):
+    """客户侧展示用：到期信息摘要；未设到期日（永久）返回 None。"""
+    expires = _parse_date(row.get("expires_at"))
+    if expires is None:
+        return None
+    return {
+        "expiresAt": expires.isoformat(),
+        "daysLeft": (expires - _today()).days,
+        "state": subscription_state(row),
+    }
+
+
 def _valid_years(value):
     try:
         years = int(value)

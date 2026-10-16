@@ -221,6 +221,14 @@ class PlatformServerTestCase(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(data["systemName"], SYSTEM_NAME)
         self.assertEqual(data["companyName"], "ACME贸易")
+        # 客户侧可见订阅信息：到期日与剩余天数
+        self.assertEqual(data["subscription"]["expiresAt"],
+                         self.expected_expiry(1))
+        self.assertEqual(data["subscription"]["state"], "normal")
+        expires = self.registry.get_company("acme")["expires_at"]
+        self.assertEqual(data["subscription"]["daysLeft"],
+                         (platform_registry._parse_date(expires)
+                          - platform_registry._today()).days)
 
         # 公司管理员可用初始密码登录，且强制改密
         status, login = self.request(
@@ -660,6 +668,8 @@ class SingleCompanyBrandingTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(data["systemName"], SYSTEM_NAME)
         self.assertEqual(data["companyName"], "")
+        # 单公司部署没有订阅概念，不带订阅字段
+        self.assertNotIn("subscription", data)
 
         status, login = self.request(
             "POST", "/api/login",

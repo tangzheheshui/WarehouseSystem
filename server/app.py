@@ -456,10 +456,15 @@ class Handler(BaseHTTPRequestHandler):
                         "SELECT value FROM meta WHERE key = 'company_name'"
                     ).fetchone()
                     name = row["value"] if row else ""
-                self.send_json({
-                    "systemName": SYSTEM_NAME,
-                    "companyName": name,
-                })
+                body = {"systemName": SYSTEM_NAME, "companyName": name}
+                # 订阅信息只给客户公司侧；单公司部署没有订阅概念
+                subscription = (
+                    platform_registry.subscription_public(company)
+                    if company else None
+                )
+                if subscription:
+                    body["subscription"] = subscription
+                self.send_json(body)
                 return
 
             if method == "GET" and self.path == "/api/me":
