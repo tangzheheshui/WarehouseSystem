@@ -396,7 +396,8 @@ class Handler(BaseHTTPRequestHandler):
             raise service.Forbidden("仅项目管理员可以执行项目作业")
         raw = self.headers.get("X-Project-Id", "")
         if raw:
-            return raw
+            # 统一转 int：header 里是字符串，库里是整数，混比会校验恒失败
+            return int(raw)
         projects = service.user_projects(self.connection, user)
         if len(projects) == 1:
             return projects[0]["id"]
@@ -405,6 +406,24 @@ class Handler(BaseHTTPRequestHandler):
     def query_value(self, name):
         values = self.query.get(name)
         return values[0] if values else None
+
+    def template_project_id(self, user, explicit=None):
+        """模板管理项目归属：管理员显式指定项目，项目管理员走自身授权。"""
+        if user["role"] == "admin":
+            if explicit:
+                # query/body 里是字符串，库里是整数主键，必须转 int
+                return int(explicit)
+            raise ValueError("请选择项目")
+        return self.project_id(user)
+
+    def scoped_project_id(self, user):
+        """GET 类项目接口的项目归属：管理员显式 projectId，项目管理员走自身授权。"""
+        if user["role"] == "admin":
+            raw = self.query_value("projectId")
+            if not raw:
+                raise ValueError("请选择项目")
+            return int(raw)
+        return self.project_id(user)
 
     def inventory_query(self):
         query = {
@@ -546,10 +565,15 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         if method == "GET" and self.path == "/api/templates":
-            user = self.require_user(connection, role="project_admin")
+            user = self.require_user(connection)
             if not user:
                 return
-            project_id = self.project_id(user)
+            if user["role"] not in ("admin", "project_admin"):
+                self.send_json({"error": "无权限访问"}, 403)
+                return
+            project_id = self.template_project_id(
+                user, self.query_value("projectId")
+            )
             self.send_json([
                 service.get_template(connection, "inbound", project_id),
                 service.get_template(connection, "outbound", project_id),
@@ -559,13 +583,17 @@ class Handler(BaseHTTPRequestHandler):
 
         match = re.fullmatch(r"/api/templates/(inbound|outbound|move)", self.path)
         if match and method == "PUT":
-            user = self.require_user(connection, role="project_admin")
+            user = self.require_user(connection)
             if not user:
+                return
+            if user["role"] not in ("admin", "project_admin"):
+                self.send_json({"error": "无权限访问"}, 403)
                 return
             body = self.read_json()
             self.send_json(service.update_template(
-                connection, user, self.project_id(user), match.group(1),
-                body.get("columns"),
+                connection, user,
+                self.template_project_id(user, body.get("projectId")),
+                match.group(1), body.get("columns"),
             ))
             return
 
@@ -573,13 +601,17 @@ class Handler(BaseHTTPRequestHandler):
             r"/api/templates/(inbound|outbound|move)/status", self.path
         )
         if match and method == "POST":
-            user = self.require_user(connection, role="project_admin")
+            user = self.require_user(connection)
             if not user:
+                return
+            if user["role"] not in ("admin", "project_admin"):
+                self.send_json({"error": "无权限访问"}, 403)
                 return
             body = self.read_json()
             self.send_json(service.set_template_status(
-                connection, user, self.project_id(user), match.group(1),
-                body.get("status"),
+                connection, user,
+                self.template_project_id(user, body.get("projectId")),
+                match.group(1), body.get("status"),
             ))
             return
 
@@ -587,10 +619,15 @@ class Handler(BaseHTTPRequestHandler):
             r"/api/templates/(inbound|outbound|move)/download", self.path
         )
         if match and method == "GET":
-            user = self.require_user(connection, role="project_admin")
+            user = self.require_user(connection)
             if not user:
                 return
-            project_id = self.project_id(user)
+            if user["role"] not in ("admin", "project_admin"):
+                self.send_json({"error": "无权限访问"}, 403)
+                return
+            project_id = self.template_project_id(
+                user, self.query_value("projectId")
+            )
             template_type = match.group(1)
             project = connection.execute(
                 "SELECT project_name FROM projects WHERE id = ?", (project_id,)
@@ -692,29 +729,102 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         if method == "GET" and self.path == "/api/inventory/filters":
-            user = self.require_user(connection, role="project_admin")
+            user = self.require_user(connection)
             if not user:
                 return
+            if user["role"] not in ("admin", "project_admin"):
+                self.send_json({"error": "无权限访问"}, 403)
+                return
             self.send_json(service.inventory_filter_options(
-                connection, user, self.project_id(user)
+                connection, user, self.scoped_project_id(user)
             ))
             return
 
         if method == "GET" and self.path == "/api/inventory":
-            user = self.require_user(connection, role="project_admin")
+            user = self.require_user(connection)
             if not user:
                 return
+            if user["role"] not in ("admin", "project_admin"):
+                self.send_json({"error": "无权限访问"}, 403)
+                return
             self.send_json(service.list_inventory(
-                connection, user, self.project_id(user),
+                connection, user, self.scoped_project_id(user),
                 **self.inventory_query(),
             ))
             return
 
-        if method == "GET" and self.path == "/api/inventory/export":
-            user = self.require_user(connection, role="project_admin")
+        # ---- 批次修正 / 品质调整 / 禁出开关 ----
+        def inventory_adjust_admin():
+            user = self.require_user(connection)
+            if not user:
+                return None, None
+            if user["role"] not in ("admin", "project_admin"):
+                self.send_json({"error": "无权限访问"}, 403)
+                return None, None
+            body = self.read_json()
+            project_id = (
+                body.get("projectId") if user["role"] == "admin"
+                else self.project_id(user)
+            )
+            return user, (project_id, body)
+
+        if self.path == "/api/inventory/adjust" and method == "POST":
+            user, payload = inventory_adjust_admin()
+            if user:
+                project_id, body = payload
+                self.send_json(service.adjust_inventory_batches(
+                    connection, user, project_id, body.get("ids"),
+                    production_date=body.get("productionDate"),
+                    expiry_date=body.get("expiryDate"),
+                    purchase_order_no=body.get("purchaseOrderNo"),
+                ))
+            return
+
+        if self.path == "/api/inventory/quality" and method == "POST":
+            user, payload = inventory_adjust_admin()
+            if user:
+                project_id, body = payload
+                self.send_json(service.set_inventory_quality(
+                    connection, user, project_id, body.get("ids"),
+                    body.get("qualityStatus"),
+                ))
+            return
+
+        if self.path == "/api/inventory/prohibit-outbound" and method == "POST":
+            user, payload = inventory_adjust_admin()
+            if user:
+                project_id, body = payload
+                self.send_json(service.set_inventory_prohibit(
+                    connection, user, project_id, body.get("ids"),
+                    body.get("prohibit"),
+                ))
+            return
+
+        if method == "POST" and self.path == "/api/move/bulk":
+            user = self.require_user(connection)
             if not user:
                 return
-            project_id = self.project_id(user)
+            if user["role"] not in ("admin", "project_admin"):
+                self.send_json({"error": "无权限访问"}, 403)
+                return
+            body = self.read_json()
+            project_id = (
+                body.get("projectId") if user["role"] == "admin"
+                else self.project_id(user)
+            )
+            self.send_json(service.create_bulk_move(
+                connection, user, project_id, body.get("items"),
+            ))
+            return
+
+        if method == "GET" and self.path == "/api/inventory/export":
+            user = self.require_user(connection)
+            if not user:
+                return
+            if user["role"] not in ("admin", "project_admin"):
+                self.send_json({"error": "无权限访问"}, 403)
+                return
+            project_id = self.scoped_project_id(user)
             project = connection.execute(
                 "SELECT project_name FROM projects WHERE id = ?", (project_id,)
             ).fetchone()
@@ -1003,6 +1113,28 @@ class Handler(BaseHTTPRequestHandler):
                 raise ValueError("历史库存仅支持csv格式文件")
             self.send_json(service.import_history_csv(
                 connection, user, int(match.group(1)), data
+            ))
+            return
+
+        # ---- 管理员单据管理与撤销 ----
+        if method == "GET" and self.path == "/api/admin/orders":
+            user = self.require_admin(connection)
+            if not user:
+                return
+            self.send_json(service.list_admin_orders(
+                connection, self.query_value("projectId"),
+                self.query_value("type"),
+            ))
+            return
+
+        match = re.fullmatch(r"/api/admin/orders/(\d+)/reverse", self.path)
+        if match and method == "POST":
+            user = self.require_admin(connection)
+            if not user:
+                return
+            self.read_json()
+            self.send_json(service.reverse_stock_order(
+                connection, user, int(match.group(1)),
             ))
             return
 

@@ -178,7 +178,7 @@ CREATE TABLE IF NOT EXISTS stock_orders (
     project_id INTEGER NOT NULL REFERENCES projects(id),
     order_no TEXT NOT NULL UNIQUE,
     order_type TEXT NOT NULL CHECK(order_type IN ('inbound', 'outbound', 'history_import', 'move')),
-    status TEXT NOT NULL CHECK(status IN ('pending_picking', 'completed')),
+    status TEXT NOT NULL CHECK(status IN ('pending_picking', 'completed', 'reversed')),
     operator_id INTEGER NOT NULL REFERENCES users(id),
     operator_name TEXT NOT NULL,
     template_version INTEGER NOT NULL,
@@ -186,7 +186,9 @@ CREATE TABLE IF NOT EXISTS stock_orders (
     order_date TEXT,
     recipient TEXT,
     created_at TEXT NOT NULL,
-    completed_at TEXT
+    completed_at TEXT,
+    reversed_at TEXT,
+    reversed_by TEXT
 );
 
 CREATE TABLE IF NOT EXISTS stock_order_items (
@@ -211,7 +213,7 @@ CREATE TABLE IF NOT EXISTS stock_logs (
     product_id TEXT NOT NULL,
     batch_no TEXT NOT NULL,
     location_id INTEGER NOT NULL REFERENCES warehouse_locations(id),
-    change_type TEXT NOT NULL CHECK(change_type IN ('inbound', 'outbound', 'history_import', 'move_out', 'move_in')),
+    change_type TEXT NOT NULL CHECK(change_type IN ('inbound', 'outbound', 'history_import', 'move_out', 'move_in', 'inbound_reversed', 'outbound_reversed', 'move_reversed')),
     change_quantity INTEGER NOT NULL,
     operator_name TEXT NOT NULL,
     created_at TEXT NOT NULL
@@ -296,7 +298,7 @@ CREATE TABLE stock_orders (
     project_id INTEGER NOT NULL REFERENCES projects(id),
     order_no TEXT NOT NULL UNIQUE,
     order_type TEXT NOT NULL CHECK(order_type IN ('inbound', 'outbound', 'history_import', 'move')),
-    status TEXT NOT NULL CHECK(status IN ('pending_picking', 'completed')),
+    status TEXT NOT NULL CHECK(status IN ('pending_picking', 'completed', 'reversed')),
     operator_id INTEGER NOT NULL REFERENCES users(id),
     operator_name TEXT NOT NULL,
     template_version INTEGER NOT NULL,
@@ -304,7 +306,9 @@ CREATE TABLE stock_orders (
     order_date TEXT,
     recipient TEXT,
     created_at TEXT NOT NULL,
-    completed_at TEXT
+    completed_at TEXT,
+    reversed_at TEXT,
+    reversed_by TEXT
 )
 """
 
@@ -316,7 +320,7 @@ CREATE TABLE stock_logs (
     product_id TEXT NOT NULL,
     batch_no TEXT NOT NULL,
     location_id INTEGER NOT NULL REFERENCES warehouse_locations(id),
-    change_type TEXT NOT NULL CHECK(change_type IN ('inbound', 'outbound', 'history_import', 'move_out', 'move_in')),
+    change_type TEXT NOT NULL CHECK(change_type IN ('inbound', 'outbound', 'history_import', 'move_out', 'move_in', 'inbound_reversed', 'outbound_reversed', 'move_reversed')),
     change_quantity INTEGER NOT NULL,
     operator_name TEXT NOT NULL,
     created_at TEXT NOT NULL
@@ -638,6 +642,7 @@ def init_db(path=None, admin_username=None, admin_display_name=None,
             _migrate_v5(connection)
             _migrate_products_project(connection)
             _migrate_area_entities(connection)
+            _migrate_v8_reversal(connection)
             _reset_templates_v4(connection)
             if connection.execute("SELECT COUNT(*) FROM projects").fetchone()[0] == 0:
                 connection.execute(
@@ -765,6 +770,42 @@ def _migrate_products_project(connection):
                SELECT MIN(id) FROM projects
            ) WHERE project_id IS NULL"""
     )
+
+
+def _rebuild_table(connection, table, ddl):
+    """按新 DDL 重建表并搬回两表交集的列数据（改 CHECK 约束专用）。"""
+    rows = _rows(connection, table)
+    old_cols = [name for name in _columns(connection, table)]
+    connection.commit()
+    connection.execute("PRAGMA foreign_keys = OFF")
+    connection.execute("BEGIN IMMEDIATE")
+    try:
+        connection.execute(f"DROP TABLE {table}")
+        connection.executescript(ddl)
+        keep = [name for name in old_cols
+                if name in set(_columns(connection, table))]
+        if rows:
+            col_list = ",".join(keep)
+            marks = ",".join("?" for _ in keep)
+            connection.executemany(
+                f"INSERT INTO {table} ({col_list}) VALUES ({marks})",
+                [tuple(row[name] for name in keep) for row in rows],
+            )
+        connection.commit()
+    except Exception:
+        connection.rollback()
+        raise
+    finally:
+        connection.execute("PRAGMA foreign_keys = ON")
+
+
+def _migrate_v8_reversal(connection):
+    """V8 管理员撤销：stock_orders 状态加 reversed 及撤销人/时间列，
+    stock_logs 流水类型加 *_reversed 反向记录。幂等。"""
+    if "'reversed'" not in _create_sql(connection, "stock_orders"):
+        _rebuild_table(connection, "stock_orders", STOCK_ORDERS_DDL)
+    if "inbound_reversed" not in _create_sql(connection, "stock_logs"):
+        _rebuild_table(connection, "stock_logs", STOCK_LOGS_DDL)
 
 
 def _table_exists(connection, name):

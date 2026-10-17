@@ -659,11 +659,18 @@ class HttpAcceptanceTests(unittest.TestCase):
         self.assertEqual(status, 403)
         self.assertEqual(forbidden["error"], "无权限访问")
 
+        # 模板管理归管理员：不指定项目提示选择，指定项目可访问
         status, forbidden = self.request(
             "GET", "/api/templates",
             headers={"Authorization": f"Bearer {admin_token}"},
         )
-        self.assertEqual(status, 403)
+        self.assertEqual(status, 400)
+        status, templates = self.request(
+            "GET", f"/api/templates?projectId={projects[0]['id']}",
+            headers={"Authorization": f"Bearer {admin_token}"},
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(len(templates), 3)
 
         status, inventory = self.request(
             "GET",

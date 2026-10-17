@@ -370,11 +370,11 @@ class MoveTests(unittest.TestCase):
 
     def test_move_requires_project_admin(self):
         self.stock_in(quantity=5)
-        with self.assertRaisesRegex(service.Forbidden, "仅项目管理员"):
-            service.import_move(
-                self.connection, self.admin, self.project_a["id"],
-                self.workbook("move", [self.move_row()]),
-            )
+        # V8：管理员可代办项目作业（批量移库等），不再拦截
+        service.import_move(
+            self.connection, self.admin, self.project_a["id"],
+            self.workbook("move", [self.move_row()]),
+        )
         with self.assertRaisesRegex(service.Forbidden, "未授权"):
             service.import_move(
                 self.connection, self.user, self.project_b["id"],

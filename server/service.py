@@ -97,6 +97,19 @@ def user_projects(connection, user):
 
 
 def require_project(connection, user, project_id):
+    if user["role"] == "admin":
+        # 管理员可代办项目作业（如批量移库），仅要求项目存在且启用
+        try:
+            project_id = int(project_id)
+        except (TypeError, ValueError):
+            raise ValueError("项目无效")
+        row = connection.execute(
+            "SELECT * FROM projects WHERE id = ? AND status = 'active'",
+            (project_id,),
+        ).fetchone()
+        if not row:
+            raise Forbidden("项目不存在或已停用")
+        return row
     if user["role"] != "project_admin":
         raise Forbidden("仅项目管理员可以执行项目作业")
     try:
@@ -810,6 +823,428 @@ def update_project(connection, operator, project_id, project_name=None,
     return dict(connection.execute(
         "SELECT * FROM projects WHERE id = ?", (project_id,)
     ).fetchone())
+
+
+# ---- 管理员撤销（V8）：整单撤销，禁止负库存，反向流水留痕 ----
+
+ORDER_TYPE_LABELS = {
+    "inbound": "入库单", "outbound": "出库单",
+    "move": "移库单", "history_import": "历史库存初始化",
+}
+
+
+def list_admin_orders(connection, project_id=None, order_type=None):
+    """管理员单据管理：全部/指定项目的单据（含已撤销），带商品摘要。"""
+    sql = """SELECT o.*, p.project_name FROM stock_orders o
+             JOIN projects p ON p.id = o.project_id WHERE 1=1"""
+    params = []
+    if project_id:
+        sql += " AND o.project_id = ?"
+        params.append(int(project_id))
+    if order_type in ("inbound", "outbound", "move", "history_import"):
+        sql += " AND o.order_type = ?"
+        params.append(order_type)
+    sql += " ORDER BY o.id DESC LIMIT 300"
+    orders = []
+    for row in connection.execute(sql, params):
+        item = dict(row)
+        item["projectName"] = row["project_name"]
+        items = connection.execute(
+            """SELECT product_name, SUM(quantity) AS quantity
+               FROM stock_order_items WHERE order_id = ?
+               GROUP BY product_name""",
+            (row["id"],),
+        ).fetchall()
+        item["summary"] = "；".join(
+            f"{one['product_name']}×{one['quantity']}" for one in items
+        ) or "-"
+        orders.append(item)
+    return orders
+
+
+def _inventory_row(connection, project_id, product_id, location_id, batch_no):
+    return connection.execute(
+        """SELECT * FROM inventory WHERE project_id = ? AND product_id = ?
+           AND location_id = ? AND batch_no = ?""",
+        (project_id, product_id, location_id, batch_no),
+    ).fetchone()
+
+
+def _insert_reversal_log(connection, order, log, location_id, change_type,
+                         change_quantity, operator_name, now):
+    connection.execute(
+        """INSERT INTO stock_logs
+           (project_id, order_no, product_id, batch_no, location_id,
+            change_type, change_quantity, operator_name, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (order["project_id"], order["order_no"], log["product_id"],
+         log["batch_no"], location_id, change_type, change_quantity,
+         operator_name, now),
+    )
+
+
+def _reverse_inbound(connection, order, operator, now):
+    logs = connection.execute(
+        """SELECT * FROM stock_logs WHERE project_id = ? AND order_no = ?
+           AND change_type = 'inbound'""",
+        (order["project_id"], order["order_no"]),
+    ).fetchall()
+    if not logs:
+        raise ValueError("找不到该单据的入库流水，无法撤销")
+    for log in logs:
+        row = _inventory_row(connection, order["project_id"],
+                             log["product_id"], log["location_id"],
+                             log["batch_no"])
+        qty = log["change_quantity"]
+        if not row:
+            raise ValueError(f"货品 {log['product_id']} 批次 {log['batch_no']} "
+                             f"的库存行不存在（可能已并批），无法撤销")
+        available = (row["total_quantity"] - row["picking_reserved"]
+                     - row["moving_reserved"])
+        if available < qty:
+            location = _location_json(connection, log["location_id"])
+            raise ValueError(
+                f"货品 {log['product_id']} 批次 {log['batch_no']} 在 "
+                f"{location['full_name']} 的库存已被消耗（剩 {available}），"
+                f"撤销会导致负库存，请先出库或移走"
+            )
+    for log in logs:
+        qty = log["change_quantity"]
+        row = _inventory_row(connection, order["project_id"],
+                             log["product_id"], log["location_id"],
+                             log["batch_no"])
+        connection.execute(
+            """UPDATE inventory SET total_quantity = total_quantity - ?,
+               updated_at = ? WHERE id = ?""",
+            (qty, now, row["id"]),
+        )
+        _insert_reversal_log(connection, order, log, log["location_id"],
+                             "inbound_reversed", -qty,
+                             operator["display_name"], now)
+
+
+def _restore_outbound_item(connection, order, item, operator, now):
+    location = connection.execute(
+        "SELECT * FROM warehouse_locations WHERE id = ?",
+        (item["location_id"],),
+    ).fetchone()
+    if not location or location["status"] != "active":
+        raise ValueError(f"货位 {item['location_id']} 已删除或停用，"
+                         f"无法恢复出库库存，请先重新启用该货位")
+    row = _inventory_row(connection, order["project_id"],
+                         item["product_id"], item["location_id"],
+                         item["batch_no"])
+    if row:
+        connection.execute(
+            """UPDATE inventory SET total_quantity = total_quantity + ?,
+               updated_at = ? WHERE id = ?""",
+            (item["quantity"], now, row["id"]),
+        )
+    else:
+        connection.execute(
+            """INSERT INTO inventory
+               (project_id, product_id, location_id, batch_no,
+                production_date, expiry_date, inbound_date, total_quantity,
+                picking_reserved, moving_reserved, quality_status,
+                prohibit_outbound, purchase_order_no, last_inbound_at,
+                created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, NULL, ?, ?, 0, 0, ?, 0, NULL, ?, ?, ?)""",
+            (
+                order["project_id"], item["product_id"], item["location_id"],
+                item["batch_no"], item["production_date"],
+                order["order_date"], item["quantity"],
+                item["quality_status"] or "良品", now, now, now,
+            ),
+        )
+    _insert_reversal_log(
+        connection, order, item, item["location_id"], "outbound_reversed",
+        item["quantity"], operator["display_name"], now,
+    )
+
+
+def _reverse_outbound(connection, order, operator, now):
+    pick = connection.execute(
+        "SELECT * FROM picking_orders WHERE order_id = ?", (order["id"],)
+    ).fetchone()
+    if not pick:
+        raise ValueError("找不到该单据的拣货记录，无法撤销")
+    items = connection.execute(
+        "SELECT * FROM picking_items WHERE picking_order_id = ?",
+        (pick["id"],),
+    ).fetchall()
+    # 先整单校验，再恢复，避免半撤
+    for item in items:
+        location = connection.execute(
+            "SELECT status FROM warehouse_locations WHERE id = ?",
+            (item["location_id"],),
+        ).fetchone()
+        if not location or location["status"] != "active":
+            raise ValueError(f"货位已删除或停用，无法恢复出库库存，"
+                             f"请先重新启用相关货位")
+    for item in items:
+        _restore_outbound_item(connection, order, item, operator, now)
+    if pick["status"] == "pending":
+        connection.execute(
+            "DELETE FROM picking_items WHERE picking_order_id = ?",
+            (pick["id"],),
+        )
+        connection.execute(
+            "DELETE FROM picking_orders WHERE id = ?", (pick["id"],)
+        )
+
+
+def _reverse_move(connection, order, operator, now):
+    items = connection.execute(
+        "SELECT * FROM stock_order_items WHERE order_id = ?",
+        (order["id"],),
+    ).fetchall()
+    if not items:
+        raise ValueError("找不到该单据的移库明细，无法撤销")
+    for item in items:
+        if item["to_location_id"] is None or item["location_id"] is None:
+            raise ValueError("移库明细缺少货位信息，无法撤销")
+        target = _inventory_row(connection, order["project_id"],
+                                item["product_id"], item["to_location_id"],
+                                item["batch_no"] or "")
+        available = ((target["total_quantity"] - target["picking_reserved"]
+                      - target["moving_reserved"]) if target else 0)
+        if available < item["quantity"]:
+            location = _location_json(connection, item["to_location_id"])
+            raise ValueError(
+                f"货品 {item['product_id']} 批次 {item['batch_no']} 在 "
+                f"{location['full_name']} 的库存不足（剩 {available}），"
+                f"撤销会导致负库存"
+            )
+    for item in items:
+        target = _inventory_row(connection, order["project_id"],
+                                item["product_id"], item["to_location_id"],
+                                item["batch_no"] or "")
+        connection.execute(
+            """UPDATE inventory SET total_quantity = total_quantity - ?,
+               updated_at = ? WHERE id = ?""",
+            (item["quantity"], now, target["id"]),
+        )
+        source = _inventory_row(connection, order["project_id"],
+                                item["product_id"], item["location_id"],
+                                item["batch_no"] or "")
+        if source:
+            connection.execute(
+                """UPDATE inventory SET total_quantity = total_quantity + ?,
+                   updated_at = ? WHERE id = ?""",
+                (item["quantity"], now, source["id"]),
+            )
+        else:
+            connection.execute(
+                """INSERT INTO inventory
+                   (project_id, product_id, location_id, batch_no,
+                    production_date, expiry_date, inbound_date, total_quantity,
+                    picking_reserved, moving_reserved, quality_status,
+                    prohibit_outbound, purchase_order_no, last_inbound_at,
+                    created_at, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?, ?, ?, ?, ?)""",
+                (
+                    order["project_id"], item["product_id"],
+                    item["location_id"], item["batch_no"],
+                    target["production_date"], target["expiry_date"],
+                    target["inbound_date"], item["quantity"],
+                    target["quality_status"], target["prohibit_outbound"],
+                    target["purchase_order_no"], target["last_inbound_at"],
+                    now, now,
+                ),
+            )
+        for location_id, quantity in ((item["to_location_id"],
+                                       -item["quantity"]),
+                                      (item["location_id"], item["quantity"])):
+            _insert_reversal_log(
+                connection, order, item, location_id, "move_reversed",
+                quantity, operator["display_name"], now,
+            )
+
+
+def reverse_stock_order(connection, operator, order_id):
+    order = connection.execute(
+        "SELECT * FROM stock_orders WHERE id = ?", (order_id,)
+    ).fetchone()
+    if not order:
+        raise ValueError("单据不存在")
+    if order["status"] == "reversed":
+        raise ValueError("该单据已撤销，不能重复撤销")
+    if order["order_type"] == "history_import":
+        raise ValueError("历史库存初始化不支持撤销")
+    if order["status"] != "completed" and order["order_type"] != "outbound":
+        raise ValueError("仅已完成的单据可以撤销")
+
+    now = iso_now()
+    type_label = ORDER_TYPE_LABELS[order["order_type"]]
+    if order["order_type"] == "inbound":
+        _reverse_inbound(connection, order, operator, now)
+    elif order["order_type"] == "outbound":
+        _reverse_outbound(connection, order, operator, now)
+    else:
+        _reverse_move(connection, order, operator, now)
+
+    connection.execute(
+        """UPDATE stock_orders SET status = 'reversed', reversed_at = ?,
+           reversed_by = ? WHERE id = ?""",
+        (now, operator["display_name"], order_id),
+    )
+    audit(connection, operator, "order.reverse",
+          f"撤销{type_label} {order['order_no']}", order["project_id"])
+    connection.commit()
+    return dict(connection.execute(
+        "SELECT * FROM stock_orders WHERE id = ?", (order_id,)
+    ).fetchone())
+
+
+def create_bulk_move(connection, operator, project_id, items):
+    """筛选式批量移库：库存明细勾选批次 → 一步生成移库单（管理员/项目管理员）。"""
+    project = require_project(connection, operator, project_id)
+    if not isinstance(items, list) or not items:
+        raise ValueError("请选择要移库的库存批次")
+    order_no = _next_number(connection, "order", "YK")
+    today = datetime.now(timezone(timedelta(hours=8))).strftime("%Y-%m-%d")
+    rows = []
+    for index, item in enumerate(items, 1):
+        quantity = _optional_int(item.get("quantity"), "移库数量")
+        if not quantity or quantity <= 0:
+            raise ValueError("移库数量必须为正整数")
+        to_location = _required_text(item.get("toLocation"), "目标货位", 100)
+        from_location = _required_text(item.get("fromLocation"), "源货位", 100)
+        row = _inventory_row(connection, project["id"],
+                             item.get("productId"), item.get("fromLocationId"),
+                             item.get("batchNo") or "")
+        if not row:
+            raise ValueError("所选库存不存在或已变化，请刷新后重试")
+        available = (row["total_quantity"] - row["picking_reserved"]
+                     - row["moving_reserved"])
+        if quantity > available:
+            raise ValueError(f"货品 {item.get('productId')} 批次 "
+                             f"{item.get('batchNo')} 可用库存不足"
+                             f"（可用 {available}）")
+        rows.append({
+            "_row": index,
+            "order_no": order_no,
+            "order_date": today,
+            "product_code": item.get("productId"),
+            "batch_no": item.get("batchNo"),
+            "quantity": quantity,
+            "unit": _required_text(item.get("unit") or "件", "单位", 20),
+            "from_location": from_location,
+            "to_location": to_location,
+            "note": "筛选批量移库",
+        })
+    parsed = {
+        # 批量移库不走模板：模板仅服务于 Excel 导入的列名配置
+        "version": 1,
+        "rows": rows,
+        "products": _validate_items(connection, project["id"], "move", rows),
+    }
+    return create_move(connection, operator, project["id"], parsed)
+
+
+# ---- 批次修正 / 品质调整 / 禁出开关（V8）：不改数量，全部留痕 ----
+
+def _adjust_targets(connection, operator, project_id, ids):
+    """校验并取回要调整的库存行；ids 无效或越权时报错。"""
+    project = require_project(connection, operator, project_id)
+    if not isinstance(ids, list) or not ids:
+        raise ValueError("请先勾选要调整的库存批次")
+    try:
+        id_list = [int(value) for value in ids]
+    except (TypeError, ValueError):
+        raise ValueError("库存批次无效")
+    marks = ",".join("?" for _ in id_list)
+    rows = connection.execute(
+        f"""SELECT i.*, l.location_name FROM inventory i
+            JOIN warehouse_locations l ON l.id = i.location_id
+            WHERE i.id IN ({marks}) AND i.project_id = ?""",
+        (*id_list, project["id"]),
+    ).fetchall()
+    if len(rows) != len(id_list):
+        raise ValueError("部分库存批次不存在或不属于当前项目，请刷新后重试")
+    return project, rows
+
+
+def adjust_inventory_batches(connection, operator, project_id, ids,
+                             production_date=None, expiry_date=None,
+                             purchase_order_no=None):
+    """批次修正：仅允许改生产日期/到期日期/采购单号，字段缺省=不改。"""
+    project, rows = _adjust_targets(connection, operator, project_id, ids)
+    updates = {}
+    if production_date is not None:
+        updates["production_date"] = (
+            _manual_date(production_date, "生产日期") or None
+        )
+    if expiry_date is not None:
+        updates["expiry_date"] = _manual_date(expiry_date, "到期日期") or None
+    if purchase_order_no is not None:
+        updates["purchase_order_no"] = (
+            str(purchase_order_no).strip() or None
+        )
+    if not updates:
+        raise ValueError("没有要修改的字段")
+    now = iso_now()
+    for row in rows:
+        before = "；".join(
+            f"{label}: {row[key] or '空'} → {value or '空'}"
+            for key, value, label in (
+                ("production_date", updates.get("production_date"), "生产日期"),
+                ("expiry_date", updates.get("expiry_date"), "到期日期"),
+                ("purchase_order_no", updates.get("purchase_order_no"), "采购单号"),
+            ) if key in updates
+        )
+        sets = ",".join(f"{key} = ?" for key in updates)
+        connection.execute(
+            f"""UPDATE inventory SET {sets}, updated_at = ? WHERE id = ?""",
+            (*updates.values(), now, row["id"]),
+        )
+        audit(connection, operator, "inventory.adjust",
+              f"修正批次 {row['product_id']} / {row['batch_no']} @ "
+              f"{row['location_name']}（{before}）",
+              project_id=project["id"])
+    connection.commit()
+    return {"adjusted": len(rows)}
+
+
+def set_inventory_quality(connection, operator, project_id, ids,
+                          quality_status):
+    if quality_status not in ("良品", "扣留"):
+        raise ValueError("品质标记仅支持 良品 / 扣留")
+    project, rows = _adjust_targets(connection, operator, project_id, ids)
+    now = iso_now()
+    for row in rows:
+        if row["quality_status"] == quality_status:
+            continue
+        connection.execute(
+            "UPDATE inventory SET quality_status = ?, updated_at = ? WHERE id = ?",
+            (quality_status, now, row["id"]),
+        )
+        audit(connection, operator, "inventory.quality",
+              f"批次 {row['product_id']} / {row['batch_no']} @ "
+              f"{row['location_name']} 品质 {row['quality_status']} → {quality_status}",
+              project_id=project["id"])
+    connection.commit()
+    return {"adjusted": len(rows)}
+
+
+def set_inventory_prohibit(connection, operator, project_id, ids, prohibit):
+    prohibit = 1 if prohibit in (1, "1", True, "true") else 0
+    project, rows = _adjust_targets(connection, operator, project_id, ids)
+    now = iso_now()
+    label = "禁止出库" if prohibit else "恢复出库"
+    for row in rows:
+        if row["prohibit_outbound"] == prohibit:
+            continue
+        connection.execute(
+            "UPDATE inventory SET prohibit_outbound = ?, updated_at = ? WHERE id = ?",
+            (prohibit, now, row["id"]),
+        )
+        audit(connection, operator, "inventory.prohibit",
+              f"{label}：批次 {row['product_id']} / {row['batch_no']} @ "
+              f"{row['location_name']}",
+              project_id=project["id"])
+    connection.commit()
+    return {"adjusted": len(rows)}
 
 
 def _user_project_ids(connection, user_id):
